@@ -1,113 +1,92 @@
-name: Yanzz RDP (Win 2022 • MAX BOOST + Naruto)
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  rdp-naruto:
-    runs-on: windows-2022
-    timeout-minutes: 360
-
-    env:
-      TAILSCALE_VERSION: "1.82.0"
-
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
     steps:
-      - name: Enable RDP & open firewall
-        shell: pwsh
+      - name: Configure Core RDP Settings
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP-3389" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                                   -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                                   -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                                   -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User
-        shell: pwsh
+      - name: Create RDP User with fixed credentials
         run: |
-          $user = "Yanzz"
-          $pass = ConvertTo-SecureString "Evan123456" -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $user -Password $pass -AccountNeverExpires | Out-Null
-          } else {
-            Set-LocalUser -Name $user -Password $pass
+          # <-- Membuat user Evan dengan password plaintext (untuk testing)
+          $plain = "Asukoe123456"
+          $securePass = ConvertTo-SecureString $plain -AsPlainText -Force
+
+          # Hapus user Evan dulu jika sudah ada (opsional, aman untuk testing ulang)
+          if (Get-LocalUser -Name "Evan" -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name "Evan" -ErrorAction SilentlyContinue
           }
-          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+
+          New-LocalUser -Name "Evan" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "Evan"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Evan"
+
+          # Simpan supaya bisa dibaca di step lain (akan muncul di logs jika dicetak)
+          echo "RDP_CREDS=User: Evan | Password: $plain" >> $env:GITHUB_ENV
+
+          if (-not (Get-LocalUser -Name "Evan")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
 
       - name: Install Tailscale
-        shell: pwsh
         run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-$env:TAILSCALE_VERSION-amd64.msi"
-          $file = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $url -OutFile $file
-          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
-          Remove-Item $file -Force
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP/tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-      - name: Connect to Tailscale
-        shell: pwsh
-        env:
-          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      - name: Establish Tailscale Connection
         run: |
-          if (-not $env:TS_KEY) { Write-Error "❌ Tailscale key not set"; exit 1 }
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey "$env:TS_KEY" --hostname "gh-runner-$env:GITHUB_RUN_ID"
-          Start-Sleep -Seconds 10
-          $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim()
-          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
-          Write-Host "🌐 Tailscale IP: $ip"
-
-      - name: Max Performance (MAX BOOST)
-        shell: pwsh
-        run: |
-          powercfg /setactive SCHEME_MIN
-          powercfg -change -monitor-timeout-ac 0
-          powercfg -change -disk-timeout-ac 0
-          powercfg -change -standby-timeout-ac 0
-          powercfg -change -hibernate-timeout-ac 0
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" /v PowerThrottlingOff /t REG_DWORD /d 1 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 26 /f
-          # RDP codec/renderer tweak (tetap berguna meski tanpa GPU)
-          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v UseHardwareEncoderForRDP /t REG_DWORD /d 1 /f
-          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableHardwareRender /t REG_DWORD /d 1 /f
-          # Kurangi efek visual
-          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f
-          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 0 /f
-          # Optional: matikan service yang berat
-          $disable = @("SysMain","WSearch","DiagTrack","DoSvc","wuauserv","Themes","PrintSpooler")
-          foreach ($s in $disable) {
-            if (Get-Service -Name $s -ErrorAction SilentlyContinue) {
-              Stop-Service $s -Force -ErrorAction SilentlyContinue
-              Set-Service $s -StartupType Disabled -ErrorAction SilentlyContinue
-            }
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
-          Write-Host "✅ MAX BOOST applied."
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Set Wallpaper
-        shell: pwsh
+      - name: Verify RDP Accessibility
         run: |
-          $dir = "C:\Wallpapers"
-          New-Item -ItemType Directory -Path $dir -Force | Out-Null
-          $page = Invoke-WebRequest -Uri "https://ibb.co.com/LDBc8tmW" -UseBasicParsing
-          $img = ($page.Links | Where-Object { $_.href -match "i\.ibb\.co" -and $_.href -match '\.jpg|\.png' } | Select-Object -First 1).href
-          if (-not $img) { Write-Error "❌ Gagal ambil direct link dari halaman ImgBB"; exit 1 }
-          $out = Join-Path $dir "wallpaper.jpg"
-          Invoke-WebRequest -Uri $img -OutFile $out -UseBasicParsing
-          reg add "HKCU\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "$out" /f
-          reg add "HKCU\Control Panel\Desktop" /v WallpaperStyle /t REG_SZ /d 2 /f
-          rundll32.exe user32.dll, UpdatePerUserSystemParameters 1, True
-          Write-Host "🖼️ Wallpaper applied!"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
-      - name: Show Access Info
-        shell: pwsh
+      - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS INFO ==="
-          Write-Host "Address : $env:TAILSCALE_IP"
-          Write-Host "Username: Yanzz"
-          Write-Host "Password: Evan123456"
-          Write-Host "=========================`n"
-
-      - name: Keep Alive
-        shell: pwsh
-        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: Evan"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
           while ($true) {
-            Write-Host "[$(Get-Date -Format o)] 🟢 RDP running (MAX BOOST)"
-            Start-Sleep -Seconds 300
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
