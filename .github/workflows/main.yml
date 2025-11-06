@@ -1,71 +1,47 @@
-name: RDP
+name: RDP + Tailscale + StarDesk (runneradmin)
 
 on:
   workflow_dispatch:
+    inputs:
+      STAR_DESK_URL:
+        description: "Optional: direct URL to StarDesk_1.0.1.exe (paste if known)"
+        required: false
+        default: ""
 
 jobs:
-  secure-rdp:
+  setup-remote:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Enable RDP & firewall
         shell: pwsh
         run: |
-          # Enable Remote Desktop & (opsional) disable NLA
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                           -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "SecurityLayer" -Value 0 -Force
-
-          # Firewall: allow inbound 3389
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-
-          # Restart RDP service
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with fixed credentials
+      - name: Use runneradmin for RDP (change password & ensure RDP group)
         shell: pwsh
         run: |
-          $username   = "Evan"
-          $plain      = "Asukoe123456"
-          $securePass = ConvertTo-SecureString $plain -AsPlainText -Force
-
-          # Remove if exists (idempotent for reruns)
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            try { Remove-LocalUser -Name $username -ErrorAction SilentlyContinue } catch {}
-          }
-
-          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-
-          echo "RDP_USER=$username"           >> $env:GITHUB_ENV
-          echo "RDP_PASS=$plain"              >> $env:GITHUB_ENV
-          echo "RDP_CREDS=User: $username | Password: $plain" >> $env:GITHUB_ENV
-
-          if (-not (Get-LocalUser -Name $username)) {
-            Write-Error "User creation failed"
-            exit 1
-          }
+          $user = "runneradmin"
+          $pass = "Asukoe123456"
+          Set-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force)
+          try { Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction Stop } catch {}
+          echo "RDP_USER=$user" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$pass" >> $env:GITHUB_ENV
 
       - name: Install Tailscale (robust)
         shell: pwsh
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           $p = Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/qn", "/norestart" -Wait -PassThru
-          if ($p.ExitCode -ne 0) {
-            Write-Error "Tailscale MSI install failed with exit code $($p.ExitCode)"
-            exit 1
-          }
-
-          # Try common paths, then fallback to search
+          if ($p.ExitCode -ne 0) { Write-Error "Tailscale MSI install failed ($($p.ExitCode))"; exit 1 }
           $candidates = @(
             "$env:ProgramFiles\Tailscale LLC\Tailscale\tailscale.exe",
             "$env:ProgramFiles\Tailscale\tailscale.exe",
@@ -77,66 +53,34 @@ jobs:
             $tsExe = ($candidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
             if (-not $tsExe) {
               try {
-                $found = Get-ChildItem -Path "$env:ProgramFiles*", "C:\ProgramData" -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($found) { $tsExe = $found.FullName }
+                $f = Get-ChildItem -Path "$env:ProgramFiles*", "C:\ProgramData" -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($f) { $tsExe = $f.FullName }
               } catch {}
             }
             if (-not $tsExe) { Start-Sleep -Seconds 2 }
           }
-          if (-not $tsExe) {
-            Write-Error "tailscale.exe not found after install"
-            exit 1
-          }
-
+          if (-not $tsExe) { Write-Error "tailscale.exe not found"; exit 1 }
           echo "TS_EXE=$tsExe" >> $env:GITHUB_ENV
-          Write-Host "tailscale.exe at: $tsExe"
 
-      - name: Establish Tailscale Connection
+      - name: Connect Tailscale
         shell: pwsh
         run: |
           $tsExe = $env:TS_EXE
-          Write-Host "Using tailscale at: $tsExe"
-
-          # IMPORTANT: set your Tailscale auth key in repo/environment secrets as TAILSCALE_AUTH_KEY
           & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$env:GITHUB_RUN_ID"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "tailscale up failed with exit code $LASTEXITCODE"
-            exit $LASTEXITCODE
-          }
-
-          # Get IPv4 with retries
+          if ($LASTEXITCODE -ne 0) { Write-Error "tailscale up failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
           $tsIP = $null; $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-            $tsIP = & $tsExe ip -4
-            if (-not $tsIP) { Start-Sleep -Seconds 5; $retries++ }
-          }
-          if (-not $tsIP) {
-            Write-Error "Tailscale IP not assigned. Exiting."
-            exit 1
-          }
+          while (-not $tsIP -and $retries -lt 12) { $tsIP = & $tsExe ip -4; if (-not $tsIP) { Start-Sleep -Seconds 5; $retries++ } }
+          if (-not $tsIP) { Write-Error "No Tailscale IPv4"; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          Write-Host "Tailscale IP: $tsIP"
 
-      - name: Verify RDP Accessibility
+      - name: Verify RDP port via Tailscale
         shell: pwsh
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-            Write-Error "TCP connection to RDP port 3389 failed"
-            exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          $r = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $r.TcpTestSucceeded) { Write-Error "RDP 3389 not reachable"; exit 1 }
+          Write-Host "RDP 3389 reachable."
 
-      - name: Maintain Connection (keep alive)
+      - name: Install StarDesk 1.0.1
         shell: pwsh
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address : $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASS"
-          Write-Host "==================`n"
-          while ($true) {
-            Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C / cancel workflow to terminate"
-            Start-Sleep -Seconds 300
-          }
+          $tmp
