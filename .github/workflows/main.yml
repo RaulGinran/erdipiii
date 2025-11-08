@@ -1,4 +1,4 @@
-name: macOS Tailscale + TigerVNC (virtual desktop)
+name: macOS Tailscale + TigerVNC (minimal X11)
 
 on:
   workflow_dispatch:
@@ -21,11 +21,12 @@ jobs:
       - name: Info runner
         shell: bash
         run: |
+          set -euo pipefail
           sw_vers
           whoami
           echo "HOME=$HOME"
 
-      - name: Install Tailscale + TigerVNC + fluxbox + xterm
+      - name: Ensure Homebrew in PATH
         shell: bash
         run: |
           set -euo pipefail
@@ -34,10 +35,27 @@ jobs:
           fi
           eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
           eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
+          brew --version
+
+      - name: Install tailscale
+        shell: bash
+        run: |
+          set -euo pipefail
           brew update
-          brew install tailscale tiger-vnc fluxbox xterm || brew upgrade tailscale tiger-vnc fluxbox xterm || true
-          command -v tailscale && tailscale version || true
+          brew install tailscale || brew upgrade tailscale || true
+          command -v tailscale && tailscale version
+
+      - name: Install TigerVNC (try both formula names)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if brew info tigervnc >/dev/null 2>&1; then
+            brew install tigervnc || brew upgrade tigervnc || true
+          else
+            brew install tiger-vnc || brew upgrade tiger-vnc || true
+          fi
           command -v vncserver || true
+          command -v Xtigervnc || true
 
       - name: Start tailscaled & connect
         shell: bash
@@ -46,8 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${TS_AUTH:-}" ]; then
-            echo "Missing secret: TAILSCALE_AUTH_KEY" >&2
-            exit 1
+            echo "Missing secret: TAILSCALE_AUTH_KEY" >&2; exit 1
           fi
           sudo nohup tailscaled --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
 
@@ -69,7 +86,7 @@ jobs:
           echo "TAILSCALE_IP=$ip4" >> "$GITHUB_ENV"
           echo "Tailscale IP: $ip4"
 
-      - name: Configure TigerVNC & launch
+      - name: Configure VNC & launch Xvnc
         shell: bash
         env:
           VNC_PASS_INPUT: ${{ github.event.inputs.VNC_PASS }}
@@ -77,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # password: pakai input kalau ada; kalau kosong generate 8 char & tampilkan
+          # Password: pakai input kalau ada; kalau kosong generate & tampilkan
           if [ -n "${VNC_PASS_INPUT:-}" ]; then
             VNC_PASS="$VNC_PASS_INPUT"
           else
@@ -88,7 +105,7 @@ jobs:
 
           mkdir -p "$HOME/.vnc"
 
-          # tulis passwd (terenkripsi) tanpa heredoc
+          # Tulis passwd terenkripsi
           if command -v vncpasswd >/dev/null 2>&1; then
             printf "%s\n" "$VNC_PASS" | vncpasswd -f > "$HOME/.vnc/passwd"
           else
@@ -96,19 +113,19 @@ jobs:
           fi
           chmod 600 "$HOME/.vnc/passwd"
 
-          # xstartup minimal via printf (hindari heredoc/char aneh)
+          # Session minimal: cuma xterm (tanpa WM, biar nggak tergantung brew)
           printf '%s\n' \
             '#!/bin/sh' \
             'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"' \
             'export LANG=en_US.UTF-8' \
-            'fluxbox &' \
             'xterm &' \
             > "$HOME/.vnc/xstartup"
           chmod +x "$HOME/.vnc/xstartup"
 
-          # kill yang lama, lalu start lagi
+          # Kill kalau ada yang lama
           vncserver -kill :1 >/dev/null 2>&1 || true
-          pkill Xvnc || true
+          pkill -f Xtigervnc || true
+          pkill -f Xvnc || true
 
           GEOM="${GEOM:-1920x1080}"
           nohup vncserver :1 -geometry "$GEOM" -rfbport 5900 > /tmp/vncserver.log 2>&1 &
