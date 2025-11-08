@@ -1,4 +1,4 @@
-name: macOS: Tailscale + native VNC (Screen Sharing)
+name: macOSTailscale + native VNC (Screen Sharing)
 
 on:
   workflow_dispatch:
