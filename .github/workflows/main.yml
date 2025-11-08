@@ -116,4 +116,26 @@ jobs:
           echo
 
       - name: Verify VNC port (5900) is listening
-        shell
+        shell: bash
+        run: |
+          echo "== Check VNC listen on 5900 =="
+          (sudo lsof -nP -iTCP:5900 -sTCP:LISTEN || true)
+          echo "Done."
+          echo
+
+      - name: Show connection info & keep alive
+        shell: bash
+        timeout-minutes: 360
+        run: |
+          echo ""
+          echo "=== VNC ACCESS ==="
+          echo "Address : $TAILSCALE_IP"
+          echo "Password: Asukoe123456"
+          echo "=================="
+          echo ""
+          echo "Android: pakai VNC Viewer/bVNC, connect ke $TAILSCALE_IP:5900"
+          echo ""
+          while true; do
+            echo "[$(date)] VNC aktif - Cancel workflow untuk stop"
+            sleep 300
+          done
