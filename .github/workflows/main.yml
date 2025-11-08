@@ -53,39 +53,40 @@ jobs:
             exit 1
           fi
 
-      - name: Setup GUI, VNC, and Force Login
+      - name: Enable VNC Screen Sharing
         run: |
-          echo "Setting password for runner user..."
+          echo "Configuring VNC..."
           
           # -----------------------------------------------------------------
-          # Mengatur password user 'runner'
-          sudo dscl . -changepassword /Users/runner "" "$VNC_PASSWORD"
+          # KITA KEMBALI PAKAI INI. Ini mengatur password VNC, BUKAN password user
+          printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
           # -----------------------------------------------------------------
           
-          echo "Skipping legacy VNC password setup, using user auth..."
-          
-          # -----------------------------------------------------------------
-          # BLOK 'printf ... perl ...' TELAH DIHAPUS DI SINI
-          # Kita tidak lagi mengatur password VNC terpisah.
-          # -----------------------------------------------------------------
-          
-          echo "Activating ARD/VNC and forcing GUI login..."
-          # Perintah kickstart ini akan menggunakan password user 'runner' untuk autentikasi
+          # Aktifkan VNC
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -allowAccessFor -allUsers \
             -configure -access -on \
             -configure -privs -all \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
-            -restart -agent -console \
-            -login -name runner -password "$VNC_PASSWORD"
+            -restart -agent -console
           
-          # Pastikan service-nya berjalan
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          echo "✓ VNC setup and GUI login initiated."
-          echo "Waiting 15s for GUI session to stabilize..."
-          sleep 15
+          echo "✓ VNC enabled"
+
+      - name: Force Start GUI (Login Window)
+        run: |
+          echo "Forcing GUI Login Window to start..."
+          # -----------------------------------------------------------------
+          # INI PERINTAH KUNCI UNTUK MEMPERBAIKI BLACK SCREEN
+          # Ini memaksa loginwindow (layar login GUI) untuk menyala.
+          sudo launchctl kickstart -k system/com.apple.loginwindow
+          # -----------------------------------------------------------------
+          
+          echo "Waiting 10s for GUI to stabilize..."
+          sleep 10
+          echo "✓ GUI should be active"
 
       - name: Verify VNC Port
         run: |
@@ -104,24 +105,14 @@ jobs:
           echo "Password: $VNC_PASSWORD"
           echo "================================"
           echo ""
-          echo "TROUBLESHOOTING:"
-          echo "- If black screen: Wait 30-60 seconds"
-          echo "- Try disconnect/reconnect"
-          echo "- Check VNC Viewer color mode settings"
+          echo "LOGIN INSTRUCTIONS:"
+          echo "1. Connect to Address above"
+          echo "2. **LEAVE USERNAME EMPTY**"
+          echo "3. Use the Password above"
           echo ""
           
           # Keep everything alive
           while true; do
             echo "[$(date)] macOS VNC Active"
-            
-            # Keep display awake
-            caffeinate -u -t 1 &
-            
-            # Restart Finder if crashed
-            if ! pgrep -x Finder > /dev/null; then
-              echo "Restarting Finder..."
-              sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app &
-            fi
-            
             sleep 300
           done
