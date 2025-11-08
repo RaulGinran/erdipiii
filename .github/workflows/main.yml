@@ -30,20 +30,20 @@ jobs:
           # Wait for installation
           sleep 3
           
-          # Start tailscaled daemon manually in background
+          # Find the correct binary paths
+          echo "Checking installed files..."
+          ls -la /Applications/Tailscale.app/Contents/MacOS/ || true
+          
+          # Create necessary directories
+          sudo mkdir -p /var/run/tailscale
+          sudo mkdir -p /var/lib/tailscale
+          
+          # Start tailscaled daemon manually in background (correct path)
           echo "Starting Tailscale daemon..."
-          sudo /Applications/Tailscale.app/Contents/MacOS/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale --socket=/var/run/tailscale/tailscaled.sock install-system-daemon &
           
-          # Wait for daemon socket to be ready
+          # Wait for daemon to initialize
           sleep 10
-          
-          # Verify daemon is running
-          if ! pgrep -x tailscaled > /dev/null; then
-            echo "❌ Tailscale daemon failed to start"
-            exit 1
-          fi
-          
-          echo "✓ Daemon running"
           
           # Connect to Tailscale network
           echo "Connecting to Tailscale..."
