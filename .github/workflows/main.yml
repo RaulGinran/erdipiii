@@ -1,18 +1,18 @@
-name: VNC + Tailscale (macOS)
+name: VNC + Tailscale (macOS, verbose)
 
 on:
   workflow_dispatch:
 
 jobs:
   setup-remote:
-    runs-on: macos-latest   # bisa ganti ke macos-14 / macos-13
+    runs-on: macos-latest    # bisa ganti macos-14 / macos-13
     timeout-minutes: 360
 
     steps:
       - name: Enable Screen Sharing (VNC)
         shell: bash
         run: |
-          echo "Mengaktifkan VNC + Remote Management..."
+          echo "== Enable VNC / Remote Management =="
           sudo systemsetup -setremotelogin on || true
 
           # Aktifkan Apple Remote Desktop (Screen Sharing) + set VNC password
@@ -23,13 +23,14 @@ jobs:
             -restart -agent -privs -all
 
           echo "VNC password: Asukoe123456"
+          echo
 
       - name: Install latest Tailscale .pkg (not App Store)
         shell: bash
         run: |
           set -euo pipefail
           STABLE_INDEX="https://pkgs.tailscale.com/stable/"
-          echo "Resolving latest macOS pkg from ${STABLE_INDEX} ..."
+          echo "== Resolve latest Tailscale macOS pkg from index =="
           PKG_NAME="$(curl -fsSL "$STABLE_INDEX" | grep -o 'Tailscale-[0-9.]*-macos\.pkg' | sort -Vr | head -n1)"
           if [[ -z "${PKG_NAME:-}" ]]; then
             echo "ERROR: gagal menemukan nama pkg Tailscale di index."
@@ -48,48 +49,71 @@ jobs:
             echo "ERROR: Tailscale binary tidak ditemukan di ${TS_BIN}"
             exit 1
           fi
+          "${TS_BIN}" version || true
           echo "TS_BIN=${TS_BIN}" >> "$GITHUB_ENV"
+          echo
 
-      - name: Bring up Tailscale
+      - name: Bring up Tailscale (verbose, extended retries)
         shell: bash
         run: |
           set -euo pipefail
           TS_BIN="${TS_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
-          echo "Using ${TS_BIN}"
-          sudo "${TS_BIN}" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="macos-runner-${GITHUB_RUN_ID}"
+          HOST="macos-runner-${GITHUB_RUN_ID}"
 
-          # Ambil IPv4 dengan retry
+          echo "== Tailscale up (verbose) =="
+          echo "Binary  : ${TS_BIN}"
+          echo "Hostname: ${HOST}"
+
+          # Tips: tambahkan flag ini agar join lebih cepat & minim side-effects DNS/route
+          # --ssh menyalakan Tailscale SSH (opsional, boleh dihapus)
+          sudo "${TS_BIN}" up \
+            --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" \
+            --hostname="${HOST}" \
+            --accept-dns=false \
+            --accept-routes=false \
+            --ssh || {
+              echo "tailscale up exit code $?"
+              echo "Dump partial status (best-effort):"
+              sudo "${TS_BIN}" status || true
+              exit 1
+            }
+
+          echo
+          echo "== Polling for Tailscale IPv4 (up to ~3 minutes) =="
           tries=0
           TS_IP=""
-          while [[ $tries -lt 12 ]]; do
-            TS_IP="$("${TS_BIN}" ip -4 | head -n1 || true)"
-            [[ -n "$TS_IP" ]] && break
-            sleep 5
+          while [[ $tries -lt 36 ]]; do   # 36 * 5s = 180 detik (3 menit)
+            TS_IP="$(sudo "${TS_BIN}" ip -4 | head -n1 || true)"
+            if [[ -n "$TS_IP" ]]; then
+              echo "Tailscale IP acquired: ${TS_IP}"
+              break
+            fi
             tries=$((tries+1))
+            echo "No IP yet... (${tries}/36) waiting 5s"
+            sleep 5
           done
-          [[ -z "$TS_IP" ]] && { echo "No Tailscale IPv4"; exit 1; }
+
+          if [[ -z "$TS_IP" ]]; then
+            echo "ERROR: Tidak dapat IP Tailscale dalam 3 menit."
+            echo "Cek hal ini:"
+            echo "  1) secrets.TAILSCALE_AUTH_KEY valid & belum expired"
+            echo "  2) Auth key punya izin 'Reusable' atau 'Ephemeral' (tidak perlu GUI login)"
+            echo "  3) ACL tailnet tidak memblok koneksi"
+            echo
+            echo "-- tailscale status --"
+            sudo "${TS_BIN}" status || true
+            echo
+            echo "-- tailscale netcheck (best-effort) --"
+            sudo "${TS_BIN}" netcheck || true
+            exit 1
+          fi
+
           echo "TAILSCALE_IP=${TS_IP}" >> "$GITHUB_ENV"
-          echo "Tailscale IP: ${TS_IP}"
+
+          echo
+          echo "== Quick status =="
+          sudo "${TS_BIN}" status || true
+          echo
 
       - name: Verify VNC port (5900) is listening
-        shell: bash
-        run: |
-          echo "Cek listener 5900..."
-          (sudo lsof -nP -iTCP:5900 -sTCP:LISTEN || true)
-          echo "Done."
-
-      - name: Show connection info & keep alive
-        shell: bash
-        timeout-minutes: 360
-        run: |
-          echo ""
-          echo "=== VNC ACCESS ==="
-          echo "Address : $TAILSCALE_IP"
-          echo "Password: Asukoe123456"
-          echo "=================="
-          echo ""
-          echo "Android: pakai VNC Viewer/bVNC, connect ke $TAILSCALE_IP:5900"
-          while true; do
-            echo "[$(date)] VNC aktif - Cancel workflow untuk stop"
-            sleep 300
-          done
+        shell
