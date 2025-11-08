@@ -1,12 +1,16 @@
-name: macOSTailscale + native VNC (Screen Sharing)
+name: macOS Tailscale + TigerVNC (virtual desktop)
 
 on:
   workflow_dispatch:
     inputs:
       VNC_PASS:
-        description: "Opsional: VNC password (maks 8 char). Kalau kosong akan digenerate & ditampilkan."
+        description: "Opsional: VNC password (kalau kosong, akan di-generate & ditampilkan)"
         required: false
         default: ""
+      GEOMETRY:
+        description: "Resolusi VNC (mis. 1920x1080)"
+        required: false
+        default: "1920x1080"
 
 jobs:
   macos-remote:
@@ -14,14 +18,14 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Info
+      - name: Info runner
         shell: bash
         run: |
           sw_vers
           echo "User: $(whoami)"
-          echo "Home: $HOME"
+          echo "Brew prefix(s): /opt/homebrew (arm) /usr/local (intel)"
 
-      - name: Install Tailscale via Homebrew
+      - name: Install Tailscale + TigerVNC + fluxbox + xterm
         shell: bash
         run: |
           if ! command -v brew >/dev/null 2>&1; then
@@ -29,9 +33,13 @@ jobs:
           fi
           eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
           eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
+
           brew update
-          brew install tailscale || brew upgrade tailscale || true
-          tailscale version || true
+          # tiger-vnc (nama formula benar), plus WM & terminal minimal
+          brew install tailscale tiger-vnc fluxbox xterm || brew upgrade tailscale tiger-vnc fluxbox xterm || true
+
+          echo "which tailscale: $(command -v tailscale || true)"
+          echo "which vncserver: $(command -v vncserver || true)"
 
       - name: Start tailscaled & connect
         shell: bash
@@ -43,12 +51,15 @@ jobs:
             echo "Missing secret: TAILSCALE_AUTH_KEY" >&2; exit 1
           fi
           sudo nohup tailscaled --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
+
           for i in $(seq 1 20); do
             tailscale status >/dev/null 2>&1 && break || sleep 1
           done
+
           HOST="gha-macos-${GITHUB_RUN_ID}"
           sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}" --accept-routes --accept-dns || \
           sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}"
+
           ip4="$(tailscale ip -4 | awk '/^ *100\./{print $1;exit}')"
           if [ -z "$ip4" ]; then
             echo "No Tailscale IPv4 yet"; tailscale status || true; tail -n 100 /tmp/tailscaled.log || true; exit 1
@@ -56,63 +67,76 @@ jobs:
           echo "TAILSCALE_IP=$ip4" >> "$GITHUB_ENV"
           echo "Tailscale IP: $ip4"
 
-      - name: Enable macOS Screen Sharing (VNC) for current user
+      - name: Configure TigerVNC password & xstartup; launch VNC (port 5900)
         shell: bash
         env:
           VNC_PASS_INPUT: ${{ github.event.inputs.VNC_PASS }}
+          GEOM: ${{ github.event.inputs.GEOMETRY }}
         run: |
           set -euo pipefail
-
-          # --- password: pakai input kalau ada; kalau kosong generate 8 char & TAMPILKAN ---
+          # --- password: pakai input kalau ada; kalau kosong generate 8 char & tampilkan ---
           if [ -n "${VNC_PASS_INPUT:-}" ]; then
             VNC_PASS="$VNC_PASS_INPUT"
           else
             VNC_PASS="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)"
             echo "::notice::Generated VNC password: ${VNC_PASS}"
           fi
-          VNC_PASS="${VNC_PASS:0:8}"   # batas 8
-
-          CURUSER="$(whoami)"
-          echo "VNC will allow user: $CURUSER"
-
-          KICK="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
-
-          # Aktifkan ARD / Screen Sharing + legacy VNC password
-          sudo "$KICK" -activate
-          sudo "$KICK" -configure -access -on
-          sudo "$KICK" -configure -clientopts -setvnclegacy -vnclegacy yes
-          sudo "$KICK" -configure -setvncpw -vncpw "$VNC_PASS"
-
-          # Beri semua priv ke user 'runner' (atau user saat ini)
-          sudo "$KICK" -configure -users "$CURUSER" -privs -all
-          sudo "$KICK" -restart -agent
-
-          # Pastikan service screensharingd aktif
-          sudo launchctl unload -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo launchctl load  -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
-
-          # (opsional) SSH
-          sudo systemsetup -setremotelogin on
-
-          # simpan pw utk step terakhir
           echo "VNC_PASS=$VNC_PASS" >> "$GITHUB_ENV"
 
-      - name: Info koneksi & keep alive
+          # Siapkan ~/.vnc
+          mkdir -p "$HOME/.vnc"
+          # Tulis passwd terenkripsi (vncpasswd -f baca dari stdin)
+          if command -v vncpasswd >/dev/null 2>&1; then
+            printf "%s\n" "$VNC_PASS" | vncpasswd -f > "$HOME/.vnc/passwd"
+          else
+            # fallback path brew
+            printf "%s\n" "$VNC_PASS" | /opt/homebrew/bin/vncpasswd -f > "$HOME/.vnc/passwd"
+          fi
+          chmod 600 "$HOME/.vnc/passwd"
+
+          # xstartup minimal: start fluxbox + xterm
+          cat > "$HOME/.vnc/xstartup" << 'EOS'
+#!/bin/sh
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export LANG=en_US.UTF-8
+# Start a simple window manager & a terminal
+fluxbox &
+xterm &
+EOS
+          chmod +x "$HOME/.vnc/xstartup"
+
+          # Matikan instance lama (kalau ada)
+          vncserver -kill :1 >/dev/null 2>&1 || true
+          pkill Xvnc || true
+
+          # Start VNC pada :1 tapi binding ke TCP 5900 biar standar
+          GEOM="${GEOM:-1920x1080}"
+          # beberapa build pakai nama 'Xvnc', yang lain 'Xtigervnc'; biarin vncserver yang handle
+          nohup vncserver :1 -geometry "$GEOM" -rfbport 5900 > /tmp/vncserver.log 2>&1 &
+
+          sleep 2
+          echo "===== vncserver.log ====="
+          tail -n +1 /tmp/vncserver.log || true
+          echo "========================="
+
+          echo "VNC_PORT=5900" >> "$GITHUB_ENV"
+
+      - name: Connection info & keep alive
         shell: bash
         timeout-minutes: 360
         run: |
           echo ""
-          echo "=== CONNECTION INFO ==="
+          echo "=== CONNECTION INFO (TigerVNC X11) ==="
           echo "Tailscale IP : ${TAILSCALE_IP}"
           echo "VNC address  : ${TAILSCALE_IP}:5900"
-          echo "User (ScreenSharing): $(whoami)"
           echo "VNC password : ${VNC_PASS}"
-          echo "tailscaled log: /tmp/tailscaled.log"
-          echo "======================="
+          echo "Geometry     : ${GEOMETRY:-1920x1080}"
+          echo "Log files    : /tmp/tailscaled.log , /tmp/vncserver.log"
+          echo "======================================"
           echo ""
           while true; do
             date
             tailscale status | head -n 20 || true
-            sudo launchctl list | grep -i screensharing || true
+            ps aux | egrep 'vncserver|Xvnc|Xtigervnc' | egrep -v egrep || true
             sleep 300
           done
