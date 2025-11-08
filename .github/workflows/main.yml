@@ -1,39 +1,82 @@
-name: VNC + Tailscale + StarDesk (macOS)
+name: VNC + Tailscale (macOS)
 
 on:
   workflow_dispatch:
 
 jobs:
   setup-remote:
-    runs-on: macos-latest   # bisa ubah ke macos-14, macos-13, dst.
+    runs-on: macos-latest   # bisa ubah ke macos-14 / macos-13
     timeout-minutes: 360
 
     steps:
       - name: Enable Screen Sharing (VNC)
         shell: bash
         run: |
-          echo "Mengaktifkan VNC access..."
-          sudo systemsetup -setremotelogin on
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement.plist VNCAlwaysStartOnConsole -bool true
+          echo "Mengaktifkan VNC + Remote Management..."
+          sudo systemsetup -setremotelogin on || true
+
+          # Aktifkan Apple Remote Desktop (Screen Sharing) + set VNC password
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw Asukoe123456 \
             -restart -agent -privs -all
 
-          echo "VNC password diset ke: Asukoe123456"
+          echo "VNC password: Asukoe123456"
 
-      - name: Install Tailscale
+      - name: Install Tailscale from official PKG (NOT App Store)
         shell: bash
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=macos-runner-${GITHUB_RUN_ID}
-          sleep 10
-          tailscale ip -4 | tee tailscale_ip.txt
-          echo "TAILSCALE_IP=$(cat tailscale_ip.txt)" >> $GITHUB_ENV
+          set -e
+          TS_VER="1.82.0"
+          PKG="tailscale-${TS_VER}-macos.pkg"
+          URL="https://pkgs.tailscale.com/stable/${PKG}"
+
+          echo "Downloading ${URL}..."
+          curl -fsSL -o "${PKG}" "${URL}"
+
+          echo "Installing ${PKG}..."
+          sudo installer -pkg "${PKG}" -target /
+
+          # Lokasi CLI Tailscale di macOS kalau install dari pkg:
+          TS_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+          if [ ! -x "${TS_BIN}" ]; then
+            echo "ERROR: Tailscale binary not found at ${TS_BIN}"
+            exit 1
+          fi
+          echo "TS_BIN=${TS_BIN}" >> $GITHUB_ENV
+
+      - name: Bring up Tailscale
+        shell: bash
+        run: |
+          TS_BIN="${TS_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
+          echo "Using ${TS_BIN}"
+          sudo "${TS_BIN}" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="macos-runner-${GITHUB_RUN_ID}"
+
+          # Ambil IPv4 dengan retry
+          tries=0
+          TS_IP=""
+          while [ $tries -lt 12 ]; do
+            TS_IP="$("${TS_BIN}" ip -4 | head -n1)"
+            [ -n "$TS_IP" ] && break
+            sleep 5
+            tries=$((tries+1))
+          done
+          [ -z "$TS_IP" ] && { echo "No Tailscale IPv4"; exit 1; }
+          echo "TAILSCALE_IP=${TS_IP}" >> $GITHUB_ENV
+          echo "Tailscale IP: ${TS_IP}"
+
+      - name: Verify VNC port (5900) is listening
+        shell: bash
+        run: |
+          echo "Cek listener 5900..."
+          (sudo lsof -nP -iTCP:5900 -sTCP:LISTEN || true)
+          # Tes TCP via loopback (opsional). Di tailnet, koneksi dari Android akan pakai Tailscale IP.
+          echo "Done."
 
       - name: Show connection info & keep alive
         shell: bash
+        timeout-minutes: 360
         run: |
           echo ""
           echo "=== VNC ACCESS ==="
@@ -41,9 +84,10 @@ jobs:
           echo "Password: Asukoe123456"
           echo "=================="
           echo ""
-          echo "Connect via VNC app (RealVNC, Remmina, atau Android VNC Viewer)"
-          echo "contoh address: vnc://$TAILSCALE_IP"
+          echo "Gunakan app VNC di Android (mis. VNC Viewer / bVNC)."
+          echo "Masukkan address: vnc://$TAILSCALE_IP  atau langsung $TAILSCALE_IP:5900"
+          echo ""
           while true; do
-            echo "[$(date)] VNC aktif - tekan Cancel workflow untuk stop"
+            echo "[$(date)] VNC aktif - Cancel workflow untuk stop"
             sleep 300
           done
