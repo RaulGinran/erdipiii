@@ -1,4 +1,4 @@
-name: macOS: Tailscale + TigerVNC (minimal X11)
+name: macOS Tailscale + TigerVNC (minimal X11)
 
 on:
   workflow_dispatch:
