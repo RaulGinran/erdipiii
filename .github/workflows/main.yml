@@ -9,33 +9,26 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Generate Passwords
+      - name: Generate credentials
         shell: bash
         run: |
-          # Password user runner (16) dan VNC password (maks 8 utk legacy VNC)
-          RUNNER_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-16)"
+          # VNC password max 8 chars (legacy VNC)
           VNC_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-8)"
-
-          echo "RUNNER_PASSWORD=$RUNNER_PASSWORD" >> "$GITHUB_ENV"
+          NEW_ADMIN="ghvnc"
+          NEW_ADMIN_PW="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-16)"
           echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
-
-          echo "✓ Runner password generated (16 chars)"
-          echo "✓ VNC password generated (8 chars - legacy VNC limit)"
+          echo "NEW_ADMIN=$NEW_ADMIN" >> "$GITHUB_ENV"
+          echo "NEW_ADMIN_PW=$NEW_ADMIN_PW" >> "$GITHUB_ENV"
+          echo "✓ Generated VNC (8) & admin creds (16)"
 
       - name: Install Tailscale
         shell: bash
         run: |
-          echo "Installing Tailscale..."
           brew install tailscale
-
-          echo "Starting Tailscale daemon..."
           sudo brew services start tailscale
           sleep 8
-
-          echo "Connecting to Tailscale..."
-          # Hindari multi-line dengan backslash (sering error di GA karena whitespace)
           sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="gh-mac-${{ github.run_id }}" --accept-routes
-          echo "✓ Tailscale connected"
+          echo "✓ Tailscale up"
 
       - name: Get Tailscale IP
         shell: bash
@@ -50,29 +43,21 @@ jobs:
             echo "⏳ Waiting for IP... $i/20"
             sleep 3
           done
-          echo "❌ Failed to get Tailscale IP"
-          exit 1
+          echo "❌ Failed to get Tailscale IP"; exit 1
 
-      - name: Set 'runner' user password (correct dscl syntax)
+      - name: Create GUI admin (no change to 'runner')
         shell: bash
         run: |
-          echo "Setting password for user 'runner'..."
-          # Set langsung (sudo) cukup new password saja
-          sudo dscl . -passwd /Users/runner "$RUNNER_PASSWORD"
-          # Verifikasi kredensial
-          if dscl /Local/Default -authonly runner "$RUNNER_PASSWORD" >/dev/null 2>&1; then
-            echo "✓ 'runner' password updated & verified"
-          else
-            echo "❌ Failed to verify 'runner' password"
-            exit 1
-          fi
+          echo "Creating admin user: $NEW_ADMIN"
+          sudo sysadminctl -addUser "$NEW_ADMIN" -password "$NEW_ADMIN_PW" -admin -home "/Users/$NEW_ADMIN" -UID 599 || {
+            echo "Note: user may already exist, continuing…"
+          }
+          dscl . -read "/Users/$NEW_ADMIN" >/dev/null && echo "✓ Admin ready"
 
       - name: Enable Remote Management + Legacy VNC
         shell: bash
         run: |
-          echo "Activating ARD/Remote Management and enabling legacy VNC..."
-
-          # Izinkan semua user & semua privilese (observe/control, restart, dll)
+          echo "Enabling ARD + legacy VNC"
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -access -on \
@@ -80,59 +65,49 @@ jobs:
             -configure -clientopts -setvnclegacy -vnclegacy yes \
             -configure -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
             -restart -agent -console
-
-          # Pastikan ScreenSharing daemon aktif (5900)
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-
-          # Sedikit jeda biar agent siap
           sleep 5
           echo "✓ ARD + VNC enabled"
 
       - name: Verify VNC service
         shell: bash
         run: |
-          echo "Checking VNC port..."
           if lsof -nP -iTCP:5900 -sTCP:LISTEN >/dev/null 2>&1; then
-            echo "✓ Port 5900 is listening"
+            echo "✓ Port 5900 listening"
           else
-            echo "⚠️  Port 5900 not listening yet"
+            echo "⚠️  Port 5900 not listening (yet)"
           fi
-
-          echo "Processes:"
           ps aux | egrep -i "ScreenSharing|RemoteManagement|ARDAgent" | grep -v egrep || true
 
-      - name: Display Connection Info & Keep Alive
+      - name: Connection Info & Keep Alive
         shell: bash
         run: |
-          echo ""
-          echo "================================"
-          echo "   macOS VNC CONNECTION INFO"
-          echo "================================"
-          echo "Address (Tailscale): $TAILSCALE_IP:5900"
-          echo "VNC Password       : $VNC_PASSWORD"
-          echo "--------------------------------"
-          echo "Username (mac login): runner"
-          echo "User Password      : $RUNNER_PASSWORD"
-          echo "================================"
-          echo ""
-          echo "Cara konek:"
-          echo "- Pakai **VNC password** (tanpa username) di kebanyakan VNC client."
-          echo "- Kalau client mendukung Apple Screen Sharing auth (jarang di luar macOS),"
-          echo "  kamu bisa coba login pakai user 'runner' + password user."
-          echo ""
-          echo "Troubleshooting:"
-          echo "- Black screen? Tunggu 30–60 detik, reconnect."
-          echo "- Pastikan mode auth di VNC client = 'VNC password' (bukan username/password)."
-          echo "- Cek port: lsof -nP -iTCP:5900 -sTCP:LISTEN"
-          echo "- Restart agent: kickstart -restart -agent -console"
-          echo ""
+          cat <<EOF
 
-          # Keep alive loop
+================================
+   macOS VNC CONNECTION INFO
+================================
+Address (Tailscale): $TAILSCALE_IP:5900
+VNC Password       : $VNC_PASSWORD   (use 'VNC password' mode)
+--------------------------------
+macOS GUI login user : $NEW_ADMIN
+macOS GUI password   : $NEW_ADMIN_PW
+================================
+
+Cara pakai:
+1) VNC client → connect ke $TAILSCALE_IP:5900 → masukkan VNC password (bukan user/pass).
+2) Setelah masuk, kalau lihat login window, login pakai user $NEW_ADMIN + password di atas.
+
+Troubleshooting:
+- Black screen? Tunggu 30–60 detik dan reconnect.
+- Pastikan auth mode di VNC client = "VNC password".
+- Cek port: lsof -nP -iTCP:5900 -sTCP:LISTEN
+- Restart ARD agent: kickstart -restart -agent -console
+EOF
+
           while true; do
             echo "[$(date)] macOS VNC Active"
-            # Jaga layar tetap bangun
             caffeinate -u -t 2 >/dev/null 2>&1 &
-            # Pastikan Finder ada (kadang berguna)
-            pgrep -x Finder >/dev/null || sudo launchctl asuser "$(id -u runner)" /usr/bin/open -a /System/Library/CoreServices/Finder.app
+            pgrep -x Finder >/dev/null || sudo launchctl asuser "$(id -u $NEW_ADMIN)" /usr/bin/open -a /System/Library/CoreServices/Finder.app
             sleep 300
           done
