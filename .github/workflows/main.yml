@@ -53,26 +53,23 @@ jobs:
 
           echo "✓ Tailscale connected"
 
-      - name: Get Tailscale IP
+      - name: Get Tailscale IP (Ringkas)
         run: |
-          sleep 5
-          retries=0
-          while [ $retries -lt 20 ]; do
-            TSIP=$(sudo tailscale ip -4 2>/dev/null || true)
-            if [ ! -z "$TSIP" ]; then
-              echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
-              echo "✓ Tailscale IP: $TSIP"
-              break
-            fi
-            echo "⏳ Waiting for IP... $((retries + 1))/20"
-            sleep 3
-            retries=$((retries + 1))
-          done
+          # Beri waktu tunggu lebih lama setelah "tailscale up" selesai.
+          # Jika Anda sudah menunggu 15-30 detik di langkah 'up', 5 detik ini cukup.
+          sleep 5 
+          
+          TSIP=$(sudo tailscale ip -4)
           
           if [ -z "$TSIP" ]; then
             echo "❌ Failed to get Tailscale IP"
+            echo "Coba kembali ke kode yang menggunakan 'retry loop' jika ini sering gagal."
             exit 1
           fi
+          
+          echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
+          echo "✓ Tailscale IP: $TSIP"
+
 
       - name: Setup Virtual Display Driver & Resolution
         run: |
