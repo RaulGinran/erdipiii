@@ -21,33 +21,29 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          # Download Tailscale for macOS
-          curl -L -o /tmp/Tailscale.pkg "https://pkgs.tailscale.com/stable/Tailscale-1.82.0-macos.pkg"
+          # Install Tailscale via Homebrew (most reliable for GitHub Actions)
+          echo "Installing Tailscale via Homebrew..."
+          brew install tailscale
           
-          # Install Tailscale
-          sudo installer -pkg /tmp/Tailscale.pkg -target /
-          
-          # Wait for installation
-          sleep 3
-          
-          # Find the correct binary paths
-          echo "Checking installed files..."
-          ls -la /Applications/Tailscale.app/Contents/MacOS/ || true
-          
-          # Create necessary directories
-          sudo mkdir -p /var/run/tailscale
-          sudo mkdir -p /var/lib/tailscale
-          
-          # Start tailscaled daemon manually in background (correct path)
+          # Start tailscaled service
           echo "Starting Tailscale daemon..."
-          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale --socket=/var/run/tailscale/tailscaled.sock install-system-daemon &
+          sudo $(brew --prefix)/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
           
-          # Wait for daemon to initialize
+          # Wait for daemon to be ready
           sleep 10
+          
+          # Verify socket exists
+          if [ ! -S /var/run/tailscale/tailscaled.sock ]; then
+            echo "❌ Tailscale socket not found"
+            ps aux | grep tailscale
+            exit 1
+          fi
+          
+          echo "✓ Daemon socket ready"
           
           # Connect to Tailscale network
           echo "Connecting to Tailscale..."
-          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up \
+          sudo $(brew --prefix)/bin/tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-mac-${{ github.run_id }} \
             --accept-routes
@@ -94,7 +90,7 @@ jobs:
           
           retries=0
           while [ $retries -lt 20 ]; do
-            TSIP=$(sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null || true)
+            TSIP=$(sudo $(brew --prefix)/bin/tailscale ip -4 2>/dev/null || true)
             if [ ! -z "$TSIP" ]; then
               echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
               echo "✓ Got Tailscale IP: $TSIP"
@@ -108,7 +104,7 @@ jobs:
           if [ -z "$TSIP" ]; then
             echo "❌ Failed to get Tailscale IP"
             echo "Tailscale Status:"
-            sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale status
+            sudo $(brew --prefix)/bin/tailscale status
             exit 1
           fi
 
