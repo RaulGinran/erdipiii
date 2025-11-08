@@ -22,24 +22,22 @@ jobs:
         shell: bash
         run: |
           sw_vers
-          echo "User: $(whoami)"
-          echo "Brew prefix(s): /opt/homebrew (arm) /usr/local (intel)"
+          whoami
+          echo "HOME=$HOME"
 
       - name: Install Tailscale + TigerVNC + fluxbox + xterm
         shell: bash
         run: |
+          set -euo pipefail
           if ! command -v brew >/dev/null 2>&1; then
             /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           fi
           eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
           eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
-
           brew update
-          # tiger-vnc (nama formula benar), plus WM & terminal minimal
           brew install tailscale tiger-vnc fluxbox xterm || brew upgrade tailscale tiger-vnc fluxbox xterm || true
-
-          echo "which tailscale: $(command -v tailscale || true)"
-          echo "which vncserver: $(command -v vncserver || true)"
+          command -v tailscale && tailscale version || true
+          command -v vncserver || true
 
       - name: Start tailscaled & connect
         shell: bash
@@ -48,7 +46,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${TS_AUTH:-}" ]; then
-            echo "Missing secret: TAILSCALE_AUTH_KEY" >&2; exit 1
+            echo "Missing secret: TAILSCALE_AUTH_KEY" >&2
+            exit 1
           fi
           sudo nohup tailscaled --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
 
@@ -62,19 +61,23 @@ jobs:
 
           ip4="$(tailscale ip -4 | awk '/^ *100\./{print $1;exit}')"
           if [ -z "$ip4" ]; then
-            echo "No Tailscale IPv4 yet"; tailscale status || true; tail -n 100 /tmp/tailscaled.log || true; exit 1
+            echo "No Tailscale IPv4 yet"
+            tailscale status || true
+            tail -n 100 /tmp/tailscaled.log || true
+            exit 1
           fi
           echo "TAILSCALE_IP=$ip4" >> "$GITHUB_ENV"
           echo "Tailscale IP: $ip4"
 
-      - name: Configure TigerVNC password & xstartup; launch VNC (port 5900)
+      - name: Configure TigerVNC & launch
         shell: bash
         env:
           VNC_PASS_INPUT: ${{ github.event.inputs.VNC_PASS }}
           GEOM: ${{ github.event.inputs.GEOMETRY }}
         run: |
           set -euo pipefail
-          # --- password: pakai input kalau ada; kalau kosong generate 8 char & tampilkan ---
+
+          # password: pakai input kalau ada; kalau kosong generate 8 char & tampilkan
           if [ -n "${VNC_PASS_INPUT:-}" ]; then
             VNC_PASS="$VNC_PASS_INPUT"
           else
@@ -83,41 +86,37 @@ jobs:
           fi
           echo "VNC_PASS=$VNC_PASS" >> "$GITHUB_ENV"
 
-          # Siapkan ~/.vnc
           mkdir -p "$HOME/.vnc"
-          # Tulis passwd terenkripsi (vncpasswd -f baca dari stdin)
+
+          # tulis passwd (terenkripsi) tanpa heredoc
           if command -v vncpasswd >/dev/null 2>&1; then
             printf "%s\n" "$VNC_PASS" | vncpasswd -f > "$HOME/.vnc/passwd"
           else
-            # fallback path brew
             printf "%s\n" "$VNC_PASS" | /opt/homebrew/bin/vncpasswd -f > "$HOME/.vnc/passwd"
           fi
           chmod 600 "$HOME/.vnc/passwd"
 
-          # xstartup minimal: start fluxbox + xterm
-          cat > "$HOME/.vnc/xstartup" << 'EOS'
-#!/bin/sh
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-export LANG=en_US.UTF-8
-# Start a simple window manager & a terminal
-fluxbox &
-xterm &
-EOS
+          # xstartup minimal via printf (hindari heredoc/char aneh)
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"' \
+            'export LANG=en_US.UTF-8' \
+            'fluxbox &' \
+            'xterm &' \
+            > "$HOME/.vnc/xstartup"
           chmod +x "$HOME/.vnc/xstartup"
 
-          # Matikan instance lama (kalau ada)
+          # kill yang lama, lalu start lagi
           vncserver -kill :1 >/dev/null 2>&1 || true
           pkill Xvnc || true
 
-          # Start VNC pada :1 tapi binding ke TCP 5900 biar standar
           GEOM="${GEOM:-1920x1080}"
-          # beberapa build pakai nama 'Xvnc', yang lain 'Xtigervnc'; biarin vncserver yang handle
           nohup vncserver :1 -geometry "$GEOM" -rfbport 5900 > /tmp/vncserver.log 2>&1 &
 
           sleep 2
-          echo "===== vncserver.log ====="
+          echo "===== /tmp/vncserver.log ====="
           tail -n +1 /tmp/vncserver.log || true
-          echo "========================="
+          echo "=============================="
 
           echo "VNC_PORT=5900" >> "$GITHUB_ENV"
 
