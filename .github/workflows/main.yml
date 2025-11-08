@@ -53,18 +53,22 @@ jobs:
             exit 1
           fi
 
-      - name: Setup GUI, VNC, and Force Login
+            - name: Setup GUI, VNC, and Force Login
         run: |
           echo "Setting password for runner user..."
-          # Kita butuh password untuk user 'runner' agar bisa login
-          sudo dscl . -passwd /Users/runner "$VNC_PASSWORD"
+          
+          # -----------------------------------------------------------------
+          # PERBAIKAN: Gunakan 'changepassword' dan asumsikan password lama kosong ("")
+          # Ini menghindari prompt interaktif yang menyebabkan error eDSAuthFailed
+          sudo dscl . -changepassword /Users/runner "" "$VNC_PASSWORD"
+          # -----------------------------------------------------------------
           
           echo "Configuring VNC password..."
           # Ini script perl dari workflow-mu untuk set password VNC
           printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
           
           echo "Activating ARD/VNC and forcing GUI login..."
-          # Ini adalah perintah kuncinya: mengaktifkan VNC sekaligus memaksa login
+          # Perintah kickstart tetap sama, tapi sekarang akan berhasil karena password user-nya sudah di-set
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -allowAccessFor -allUsers \
@@ -80,6 +84,7 @@ jobs:
           echo "✓ VNC setup and GUI login initiated."
           echo "Waiting 15s for GUI session to stabilize..."
           sleep 15
+          
 
       - name: Verify VNC Port
         run: |
