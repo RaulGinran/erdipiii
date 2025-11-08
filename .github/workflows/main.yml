@@ -3,7 +3,7 @@ name: macOS VNC
 on:
   workflow_dispatch:
 
-jobs
+jobs:
   macos-vnc:
     runs-on: macos-latest
     timeout-minutes: 3600
@@ -37,7 +37,7 @@ jobs
           sleep 5
           retries=0
           while [ $retries -lt 20 ]; do
-            TSIP=$(sudo tailscale ip -4 2/dev/null || true)
+            TSIP=$(sudo tailscale ip -4 2>/dev/null || true)
             if [ ! -z "$TSIP" ]; then
               echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
               echo "✓ Tailscale IP: $TSIP"
