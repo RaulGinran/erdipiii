@@ -1,117 +1,114 @@
-name: VNC + Tailscale (macOS, no-hang)
+name: macOS VNC
 
 on:
   workflow_dispatch:
 
 jobs:
-  setup-remote:
+  macos-vnc:
     runs-on: macos-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-      - name: Enable Screen Sharing (VNC)
-        shell: bash
+      - name: Create VNC User with Secure Password
         run: |
-          echo "== Enable VNC / Remote Management =="
-          sudo systemsetup -setremotelogin on || true
+          # Generate random password (same method as Windows script)
+          password=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*()_+=' < /dev/urandom | head -c 16)
+          
+          # Create user Yanzz
+          sudo dscl . -create /Users/Yanzz
+          sudo dscl . -create /Users/Yanzz UserShell /bin/bash
+          sudo dscl . -create /Users/Yanzz RealName "Yanzz"
+          sudo dscl . -create /Users/Yanzz UniqueID 1001
+          sudo dscl . -create /Users/Yanzz PrimaryGroupID 80
+          sudo dscl . -create /Users/Yanzz NFSHomeDirectory /Users/Yanzz
+          
+          # Set password
+          sudo dscl . -passwd /Users/Yanzz "$password"
+          
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership Yanzz
+          
+          # Create home directory
+          sudo createhomedir -c -u Yanzz
+          
+          echo "VNC_CREDS=User: Yanzz | Password: $password" >> $GITHUB_ENV
+          echo "VNC_PASSWORD=$password" >> $GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          # Download and install Tailscale
+          curl -o /tmp/tailscale.zip https://pkgs.tailscale.com/stable/tailscale_1.82.0_amd64.zip
+          unzip /tmp/tailscale.zip -d /tmp/
+          sudo installer -pkg /tmp/Tailscale.pkg -target /
+          
+          # Start Tailscale daemon
+          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-mac-${{ github.run_id }}
+
+      - name: Enable VNC Screen Sharing
+        run: |
+          # Enable Remote Management (VNC)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw Asukoe123456 \
-            -restart -agent -privs -all
-          echo "VNC password: Asukoe123456"
-          echo
+            -activate \
+            -configure -allowAccessFor -allUsers \
+            -configure -restart \
+            -agent \
+            -privs -all
+          
+          # Configure VNC authentication
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          
+          # Set VNC password using the generated password
+          echo "$VNC_PASSWORD" | sudo /usr/bin/vncpasswd -storepasswd /Library/Preferences/com.apple.VNCSettings.txt
+          
+          # Enable Screen Sharing
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          
+          # Restart ARD Agent
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
 
-      - name: Install latest Tailscale .pkg (not App Store)
-        shell: bash
+      - name: Get Tailscale IP
         run: |
-          set -euo pipefail
-          STABLE_INDEX="https://pkgs.tailscale.com/stable/"
-          echo "== Resolve latest Tailscale macOS pkg from index =="
-          PKG_NAME="$(curl -fsSL "$STABLE_INDEX" | grep -o 'Tailscale-[0-9.]*-macos\.pkg' | sort -Vr | head -n1)"
-          [[ -z "${PKG_NAME:-}" ]] && { echo "ERROR: gagal menemukan pkg Tailscale"; exit 1; }
-          URL="${STABLE_INDEX}${PKG_NAME}"
-          echo "Downloading ${URL} ..."
-          curl -fsSL -o "${PKG_NAME}" "${URL}"
-
-          echo "Installing ${PKG_NAME} ..."
-          sudo installer -pkg "${PKG_NAME}" -target /
-
-          TS_APP="/Applications/Tailscale.app"
-          TS_BIN="${TS_APP}/Contents/MacOS/Tailscale"
-          [[ -x "$TS_BIN" ]] || { echo "ERROR: ${TS_BIN} tidak ditemukan"; exit 1; }
-          "$TS_BIN" version || true
-          echo "TS_BIN=${TS_BIN}" >> "$GITHUB_ENV"
-          echo
-
-      # OPSI A (aman): skip buka app sama sekali, langsung up
-      # Jika kamu tetap ingin "wake" app-nya, pakai OPSI B di bawah dan hapus step ini.
-      - name: Bring up Tailscale (unattended, timeout, verbose)
-        shell: bash
-        run: |
-          set -euo pipefail
-          TS_BIN="${TS_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
-          HOST="macos-runner-${GITHUB_RUN_ID}"
-
-          echo "== tailscale up (no GUI, unattended) =="
-          sudo "$TS_BIN" up \
-            --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" \
-            --hostname="${HOST}" \
-            --unattended \
-            --accept-dns=false \
-            --accept-routes=false \
-            --ssh \
-            --timeout=60s || {
-              echo "tailscale up gagal/timeout"
-              echo "-- status --"; sudo "$TS_BIN" status || true
-              echo "-- netcheck --"; sudo "$TS_BIN" netcheck || true
-              exit 1
-            }
-
-          echo
-          echo "== Polling IPv4 (max ~3 minutes) =="
-          tries=0
-          TS_IP=""
-          while [[ $tries -lt 36 ]]; do
-            TS_IP="$(sudo "$TS_BIN" ip -4 | head -n1 || true)"
-            [[ -n "$TS_IP" ]] && { echo "Tailscale IP: ${TS_IP}"; break; }
-            tries=$((tries+1))
-            echo "No IP yet... (${tries}/36) wait 5s"
+          # Wait for Tailscale to get IP
+          sleep 10
+          
+          retries=0
+          while [ $retries -lt 10 ]; do
+            TSIP=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null)
+            if [ ! -z "$TSIP" ]; then
+              echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
+              break
+            fi
             sleep 5
+            retries=$((retries + 1))
           done
-          [[ -z "$TS_IP" ]] && { echo "ERROR: gak dapet IP Tailscale dalam 3 menit"; sudo "$TS_BIN" status || true; exit 1; }
-          echo "TAILSCALE_IP=${TS_IP}" >> "$GITHUB_ENV"
+          
+          if [ -z "$TSIP" ]; then
+            echo "Failed to get Tailscale IP"
+            exit 1
+          fi
 
-      # OPSI B (kalau tetap mau "open" app tanpa hang):
-      # - name: (Optional) Background-launch Tailscale app
-      #   shell: bash
-      #   run: |
-      #     TS_APP="/Applications/Tailscale.app"
-      #     echo "Background opening Tailscale..."
-      #     (open -gj -a "$TS_APP" >/dev/null 2>&1 & disown) || true
-      #     sleep 2
-
-      - name: Verify VNC port (5900) is listening
-        shell: bash
+      - name: Verify VNC Port
         run: |
-          echo "== Check VNC listen on 5900 =="
-          (sudo lsof -nP -iTCP:5900 -sTCP:LISTEN || true)
-          echo "Done."
-          echo
+          echo "Checking VNC port 5900..."
+          netstat -an | grep 5900 || echo "VNC port not listening yet"
+          
+          # Give VNC time to fully start
+          sleep 5
 
-      - name: Show connection info & keep alive
-        shell: bash
-        timeout-minutes: 360
+      - name: Display Connection Info & Keep Alive
         run: |
           echo ""
           echo "=== VNC ACCESS ==="
-          echo "Address : $TAILSCALE_IP"
-          echo "Password: Asukoe123456"
+          echo "Address: $TAILSCALE_IP:5900"
+          echo "Username: Yanzz"
+          echo "Password: $VNC_PASSWORD"
           echo "=================="
           echo ""
-          echo "Android: pakai VNC Viewer/bVNC, connect ke $TAILSCALE_IP:5900"
+          echo "Connect using VNC Viewer to: $TAILSCALE_IP"
           echo ""
+          
+          # Keep runner active
           while true; do
-            echo "[$(date)] VNC aktif - Cancel workflow untuk stop"
+            echo "[$(date)] macOS VNC Active - Use Ctrl+C in workflow to terminate"
             sleep 300
           done
