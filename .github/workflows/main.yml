@@ -1,11 +1,11 @@
-name: VNC + Tailscale (macOS, verbose)
+name: VNC + Tailscale (macOS, robust)
 
 on:
   workflow_dispatch:
 
 jobs:
   setup-remote:
-    runs-on: macos-latest    # bisa ganti macos-14 / macos-13
+    runs-on: macos-latest
     timeout-minutes: 360
 
     steps:
@@ -14,14 +14,11 @@ jobs:
         run: |
           echo "== Enable VNC / Remote Management =="
           sudo systemsetup -setremotelogin on || true
-
-          # Aktifkan Apple Remote Desktop (Screen Sharing) + set VNC password
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw Asukoe123456 \
             -restart -agent -privs -all
-
           echo "VNC password: Asukoe123456"
           echo
 
@@ -43,38 +40,52 @@ jobs:
           echo "Installing ${PKG_NAME} ..."
           sudo installer -pkg "${PKG_NAME}" -target /
 
-          # Lokasi CLI kalau install dari pkg standalone:
-          TS_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+          TS_APP="/Applications/Tailscale.app"
+          TS_BIN="${TS_APP}/Contents/MacOS/Tailscale"
           if [[ ! -x "$TS_BIN" ]]; then
             echo "ERROR: Tailscale binary tidak ditemukan di ${TS_BIN}"
             exit 1
           fi
-          "${TS_BIN}" version || true
           echo "TS_BIN=${TS_BIN}" >> "$GITHUB_ENV"
           echo
 
-      - name: Bring up Tailscale (verbose, extended retries)
+      - name: Launch Tailscale app & prepare daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          TS_BIN="${TS_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
+          TS_APP="/Applications/Tailscale.app"
+
+          echo "== Launch Tailscale app (to register Network Extension) =="
+          open -a "$TS_APP" || true
+          # Beri waktu sedikit supaya helper/daemon kebangun
+          sleep 5
+          # Pastikan versi kebaca
+          "$TS_BIN" version || true
+          echo
+
+      - name: Bring up Tailscale (unattended, timeout, verbose)
         shell: bash
         run: |
           set -euo pipefail
           TS_BIN="${TS_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
           HOST="macos-runner-${GITHUB_RUN_ID}"
 
-          echo "== Tailscale up (verbose) =="
-          echo "Binary  : ${TS_BIN}"
-          echo "Hostname: ${HOST}"
-
-          # Tips: tambahkan flag ini agar join lebih cepat & minim side-effects DNS/route
-          # --ssh menyalakan Tailscale SSH (opsional, boleh dihapus)
-          sudo "${TS_BIN}" up \
+          echo "== Tailscale up (unattended) =="
+          # --unattended: jangan minta GUI login; HARUS pakai auth key yang preauthorized/ephemeral.
+          # --timeout: kalau lama, jangan ngegantung.
+          sudo "$TS_BIN" up \
             --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" \
             --hostname="${HOST}" \
+            --unattended \
             --accept-dns=false \
             --accept-routes=false \
-            --ssh || {
-              echo "tailscale up exit code $?"
-              echo "Dump partial status (best-effort):"
-              sudo "${TS_BIN}" status || true
+            --ssh \
+            --timeout=60s || {
+              echo "tailscale up gagal/timeout."
+              echo "-- status --"; sudo "$TS_BIN" status || true
+              echo "-- netcheck --"; sudo "$TS_BIN" netcheck || true
+              echo "Kemungkinan: auth key butuh approval / expired / tidak preauthorized."
               exit 1
             }
 
@@ -82,8 +93,8 @@ jobs:
           echo "== Polling for Tailscale IPv4 (up to ~3 minutes) =="
           tries=0
           TS_IP=""
-          while [[ $tries -lt 36 ]]; do   # 36 * 5s = 180 detik (3 menit)
-            TS_IP="$(sudo "${TS_BIN}" ip -4 | head -n1 || true)"
+          while [[ $tries -lt 36 ]]; do
+            TS_IP="$(sudo "$TS_BIN" ip -4 | head -n1 || true)"
             if [[ -n "$TS_IP" ]]; then
               echo "Tailscale IP acquired: ${TS_IP}"
               break
@@ -95,24 +106,19 @@ jobs:
 
           if [[ -z "$TS_IP" ]]; then
             echo "ERROR: Tidak dapat IP Tailscale dalam 3 menit."
-            echo "Cek hal ini:"
-            echo "  1) secrets.TAILSCALE_AUTH_KEY valid & belum expired"
-            echo "  2) Auth key punya izin 'Reusable' atau 'Ephemeral' (tidak perlu GUI login)"
-            echo "  3) ACL tailnet tidak memblok koneksi"
-            echo
-            echo "-- tailscale status --"
-            sudo "${TS_BIN}" status || true
-            echo
-            echo "-- tailscale netcheck (best-effort) --"
-            sudo "${TS_BIN}" netcheck || true
+            echo "Cek:"
+            echo " - secrets.TAILSCALE_AUTH_KEY valid, belum expired"
+            echo " - Auth key di-set 'Reusable' atau 'Ephemeral' + 'Preauthorized' (NO admin approval)"
+            echo " - Tailnet policy tidak mewajibkan SSO/GUI approval"
+            echo "-- status --"; sudo "$TS_BIN" status || true
+            echo "-- netcheck --"; sudo "$TS_BIN" netcheck || true
             exit 1
           fi
 
           echo "TAILSCALE_IP=${TS_IP}" >> "$GITHUB_ENV"
-
           echo
           echo "== Quick status =="
-          sudo "${TS_BIN}" status || true
+          sudo "$TS_BIN" status || true
           echo
 
       - name: Verify VNC port (5900) is listening
