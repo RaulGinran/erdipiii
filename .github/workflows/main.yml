@@ -5,7 +5,7 @@ on:
 
 jobs:
   setup-remote:
-    runs-on: macos-latest   # bisa ubah ke macos-14 / macos-13
+    runs-on: macos-latest   # bisa ganti ke macos-14 / macos-13
     timeout-minutes: 360
 
     steps:
@@ -24,31 +24,36 @@ jobs:
 
           echo "VNC password: Asukoe123456"
 
-      - name: Install Tailscale from official PKG (NOT App Store)
+      - name: Install latest Tailscale .pkg (not App Store)
         shell: bash
         run: |
-          set -e
-          TS_VER="1.82.0"
-          PKG="tailscale-${TS_VER}-macos.pkg"
-          URL="https://pkgs.tailscale.com/stable/${PKG}"
-
-          echo "Downloading ${URL}..."
-          curl -fsSL -o "${PKG}" "${URL}"
-
-          echo "Installing ${PKG}..."
-          sudo installer -pkg "${PKG}" -target /
-
-          # Lokasi CLI Tailscale di macOS kalau install dari pkg:
-          TS_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-          if [ ! -x "${TS_BIN}" ]; then
-            echo "ERROR: Tailscale binary not found at ${TS_BIN}"
+          set -euo pipefail
+          STABLE_INDEX="https://pkgs.tailscale.com/stable/"
+          echo "Resolving latest macOS pkg from ${STABLE_INDEX} ..."
+          PKG_NAME="$(curl -fsSL "$STABLE_INDEX" | grep -o 'Tailscale-[0-9.]*-macos\.pkg' | sort -Vr | head -n1)"
+          if [[ -z "${PKG_NAME:-}" ]]; then
+            echo "ERROR: gagal menemukan nama pkg Tailscale di index."
             exit 1
           fi
-          echo "TS_BIN=${TS_BIN}" >> $GITHUB_ENV
+          URL="${STABLE_INDEX}${PKG_NAME}"
+          echo "Downloading ${URL} ..."
+          curl -fsSL -o "${PKG_NAME}" "${URL}"
+
+          echo "Installing ${PKG_NAME} ..."
+          sudo installer -pkg "${PKG_NAME}" -target /
+
+          # Lokasi CLI kalau install dari pkg standalone:
+          TS_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+          if [[ ! -x "$TS_BIN" ]]; then
+            echo "ERROR: Tailscale binary tidak ditemukan di ${TS_BIN}"
+            exit 1
+          fi
+          echo "TS_BIN=${TS_BIN}" >> "$GITHUB_ENV"
 
       - name: Bring up Tailscale
         shell: bash
         run: |
+          set -euo pipefail
           TS_BIN="${TS_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
           echo "Using ${TS_BIN}"
           sudo "${TS_BIN}" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="macos-runner-${GITHUB_RUN_ID}"
@@ -56,14 +61,14 @@ jobs:
           # Ambil IPv4 dengan retry
           tries=0
           TS_IP=""
-          while [ $tries -lt 12 ]; do
-            TS_IP="$("${TS_BIN}" ip -4 | head -n1)"
-            [ -n "$TS_IP" ] && break
+          while [[ $tries -lt 12 ]]; do
+            TS_IP="$("${TS_BIN}" ip -4 | head -n1 || true)"
+            [[ -n "$TS_IP" ]] && break
             sleep 5
             tries=$((tries+1))
           done
-          [ -z "$TS_IP" ] && { echo "No Tailscale IPv4"; exit 1; }
-          echo "TAILSCALE_IP=${TS_IP}" >> $GITHUB_ENV
+          [[ -z "$TS_IP" ]] && { echo "No Tailscale IPv4"; exit 1; }
+          echo "TAILSCALE_IP=${TS_IP}" >> "$GITHUB_ENV"
           echo "Tailscale IP: ${TS_IP}"
 
       - name: Verify VNC port (5900) is listening
@@ -71,7 +76,6 @@ jobs:
         run: |
           echo "Cek listener 5900..."
           (sudo lsof -nP -iTCP:5900 -sTCP:LISTEN || true)
-          # Tes TCP via loopback (opsional). Di tailnet, koneksi dari Android akan pakai Tailscale IP.
           echo "Done."
 
       - name: Show connection info & keep alive
@@ -84,9 +88,7 @@ jobs:
           echo "Password: Asukoe123456"
           echo "=================="
           echo ""
-          echo "Gunakan app VNC di Android (mis. VNC Viewer / bVNC)."
-          echo "Masukkan address: vnc://$TAILSCALE_IP  atau langsung $TAILSCALE_IP:5900"
-          echo ""
+          echo "Android: pakai VNC Viewer/bVNC, connect ke $TAILSCALE_IP:5900"
           while true; do
             echo "[$(date)] VNC aktif - Cancel workflow untuk stop"
             sleep 300
