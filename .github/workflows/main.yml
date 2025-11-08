@@ -57,16 +57,20 @@ jobs:
         run: |
           echo "Setting password for runner user..."
           
-          # PERBAIKAN: Gunakan 'changepassword' dan asumsikan password lama kosong ("")
-          # Ini menghindari prompt interaktif yang menyebabkan error eDSAuthFailed
+          # -----------------------------------------------------------------
+          # Mengatur password user 'runner'
           sudo dscl . -changepassword /Users/runner "" "$VNC_PASSWORD"
+          # -----------------------------------------------------------------
           
-          echo "Configuring VNC password..."
-          # Ini script perl dari workflow-mu untuk set password VNC
-          printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+          echo "Skipping legacy VNC password setup, using user auth..."
+          
+          # -----------------------------------------------------------------
+          # BLOK 'printf ... perl ...' TELAH DIHAPUS DI SINI
+          # Kita tidak lagi mengatur password VNC terpisah.
+          # -----------------------------------------------------------------
           
           echo "Activating ARD/VNC and forcing GUI login..."
-          # Perintah kickstart tetap sama, tapi sekarang akan berhasil karena password user-nya sudah di-set
+          # Perintah kickstart ini akan menggunakan password user 'runner' untuk autentikasi
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -allowAccessFor -allUsers \
