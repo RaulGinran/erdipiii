@@ -12,14 +12,13 @@ jobs:
       - name: Generate credentials
         shell: bash
         run: |
-          # VNC password max 8 chars (legacy VNC)
           VNC_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-8)"
           NEW_ADMIN="ghvnc"
           NEW_ADMIN_PW="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-16)"
           echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
           echo "NEW_ADMIN=$NEW_ADMIN" >> "$GITHUB_ENV"
           echo "NEW_ADMIN_PW=$NEW_ADMIN_PW" >> "$GITHUB_ENV"
-          echo "✓ Generated VNC (8) & admin creds (16)"
+          echo "Generated VNC and admin credentials"
 
       - name: Install Tailscale
         shell: bash
@@ -28,36 +27,35 @@ jobs:
           sudo brew services start tailscale
           sleep 8
           sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="gh-mac-${{ github.run_id }}" --accept-routes
-          echo "✓ Tailscale up"
+          echo "Tailscale up"
 
       - name: Get Tailscale IP
         shell: bash
         run: |
           for i in {1..20}; do
             TSIP="$(sudo tailscale ip -4 2>/dev/null | head -n1 || true)"
-            if [[ -n "$TSIP" ]]; then
+            if [ -n "$TSIP" ]; then
               echo "TAILSCALE_IP=$TSIP" >> "$GITHUB_ENV"
-              echo "✓ Tailscale IP: $TSIP"
+              echo "Tailscale IP: $TSIP"
               exit 0
             fi
-            echo "⏳ Waiting for IP... $i/20"
+            echo "Waiting for IP... $i/20"
             sleep 3
           done
-          echo "❌ Failed to get Tailscale IP"; exit 1
+          echo "Failed to get Tailscale IP"
+          exit 1
 
-      - name: Create GUI admin (no change to 'runner')
+      - name: Create GUI admin user
         shell: bash
         run: |
           echo "Creating admin user: $NEW_ADMIN"
-          sudo sysadminctl -addUser "$NEW_ADMIN" -password "$NEW_ADMIN_PW" -admin -home "/Users/$NEW_ADMIN" -UID 599 || {
-            echo "Note: user may already exist, continuing…"
-          }
-          dscl . -read "/Users/$NEW_ADMIN" >/dev/null && echo "✓ Admin ready"
+          sudo sysadminctl -addUser "$NEW_ADMIN" -password "$NEW_ADMIN_PW" -admin -home "/Users/$NEW_ADMIN" -UID 599 || true
+          dscl . -read "/Users/$NEW_ADMIN" >/dev/null
+          echo "Admin user ready"
 
       - name: Enable Remote Management + Legacy VNC
         shell: bash
         run: |
-          echo "Enabling ARD + legacy VNC"
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -access -on \
@@ -67,47 +65,38 @@ jobs:
             -restart -agent -console
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           sleep 5
-          echo "✓ ARD + VNC enabled"
+          echo "ARD + VNC enabled"
 
       - name: Verify VNC service
         shell: bash
         run: |
           if lsof -nP -iTCP:5900 -sTCP:LISTEN >/dev/null 2>&1; then
-            echo "✓ Port 5900 listening"
+            echo "Port 5900 is listening"
           else
-            echo "⚠️  Port 5900 not listening (yet)"
+            echo "Port 5900 not listening yet"
           fi
           ps aux | egrep -i "ScreenSharing|RemoteManagement|ARDAgent" | grep -v egrep || true
 
-      - name: Connection Info & Keep Alive
+      - name: Connection info & keep alive
         shell: bash
         run: |
-          cat <<EOF
+          printf "\n==============================\n"
+          printf "   macOS VNC CONNECTION INFO\n"
+          printf "==============================\n"
+          printf "Address (Tailscale): %s:5900\n" "$TAILSCALE_IP"
+          printf "VNC Password       : %s\n" "$VNC_PASSWORD"
+          printf "------------------------------\n"
+          printf "macOS GUI user     : %s\n" "$NEW_ADMIN"
+          printf "macOS GUI password : %s\n" "$NEW_ADMIN_PW"
+          printf "==============================\n\n"
 
-================================
-   macOS VNC CONNECTION INFO
-================================
-Address (Tailscale): $TAILSCALE_IP:5900
-VNC Password       : $VNC_PASSWORD   (use 'VNC password' mode)
---------------------------------
-macOS GUI login user : $NEW_ADMIN
-macOS GUI password   : $NEW_ADMIN_PW
-================================
-
-Cara pakai:
-1) VNC client → connect ke $TAILSCALE_IP:5900 → masukkan VNC password (bukan user/pass).
-2) Setelah masuk, kalau lihat login window, login pakai user $NEW_ADMIN + password di atas.
-
-Troubleshooting:
-- Black screen? Tunggu 30–60 detik dan reconnect.
-- Pastikan auth mode di VNC client = "VNC password".
-- Cek port: lsof -nP -iTCP:5900 -sTCP:LISTEN
-- Restart ARD agent: kickstart -restart -agent -console
-EOF
+          echo "How to connect:"
+          echo "1) In your VNC client, connect to \$TAILSCALE_IP:5900 and use the VNC password above."
+          echo "2) At the macOS login window, sign in with the GUI user and password above."
 
           while true; do
             echo "[$(date)] macOS VNC Active"
             caffeinate -u -t 2 >/dev/null 2>&1 &
-            pgrep -x Finder >/dev/null || sudo launchctl asuser "$(id -u $NEW_ADMIN)" /usr/bin/open -a /System/Library/CoreServices/Finder.app
+            pgrep -x Finder >/dev/null || sudo launchctl asuser "$(id -u "$NEW_ADMIN")" /usr/bin/open -a /System/Library/CoreServices/Finder.app
             sleep 300
           done
