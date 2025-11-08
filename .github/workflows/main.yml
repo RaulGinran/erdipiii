@@ -9,93 +9,81 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Generate VNC Password
+      - name: Create VNC User with Secure Password
         run: |
-          # Generate random password
-          password=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-16)
+          # Generate random password (same method as Windows script)
+          password=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*()_+=' < /dev/urandom | head -c 16)
           
-          # Store password
-          echo "VNC_CREDS=User: runner | Password: $password" >> $GITHUB_ENV
+          # Create user Yanzz
+          sudo dscl . -create /Users/Yanzz
+          sudo dscl . -create /Users/Yanzz UserShell /bin/bash
+          sudo dscl . -create /Users/Yanzz RealName "Yanzz"
+          sudo dscl . -create /Users/Yanzz UniqueID 1001
+          sudo dscl . -create /Users/Yanzz PrimaryGroupID 80
+          sudo dscl . -create /Users/Yanzz NFSHomeDirectory /Users/Yanzz
+          
+          # Set password
+          sudo dscl . -passwd /Users/Yanzz "$password"
+          
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership Yanzz
+          
+          # Create home directory
+          sudo createhomedir -c -u Yanzz
+          
+          echo "VNC_CREDS=User: Yanzz | Password: $password" >> $GITHUB_ENV
           echo "VNC_PASSWORD=$password" >> $GITHUB_ENV
-          
-          echo "Generated VNC Password successfully"
 
       - name: Install Tailscale
         run: |
-          # Download Tailscale for macOS
-          curl -L -o /tmp/Tailscale.pkg "https://pkgs.tailscale.com/stable/Tailscale-1.82.0-macos.pkg"
-          
-          # Install Tailscale
+          # Download and install Tailscale
+          curl -o /tmp/tailscale.zip https://pkgs.tailscale.com/stable/tailscale_1.82.0_amd64.zip
+          unzip /tmp/tailscale.zip -d /tmp/
           sudo installer -pkg /tmp/Tailscale.pkg -target /
           
-          # Wait for installation
-          sleep 5
-          
-          # Start Tailscale daemon in background
-          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-mac-${{ github.run_id }} --accept-routes &
-          
-          # Wait for Tailscale to connect
-          echo "Waiting for Tailscale to connect..."
-          sleep 15
-          
-          # Check status
-          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale status || true
+          # Start Tailscale daemon
+          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-mac-${{ github.run_id }}
 
       - name: Enable VNC Screen Sharing
         run: |
-          # Set VNC password using perl (most reliable method)
-          printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
-          
-          # Enable Remote Management (ARD/VNC)
+          # Enable Remote Management (VNC)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -allowAccessFor -allUsers \
-            -configure -access -on \
             -configure -restart \
             -agent \
             -privs -all
           
-          # Enable VNC for all users
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvnclegacy -vnclegacy yes
+          # Configure VNC authentication
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
           
-          # Enable Screen Sharing service
-          sudo launchctl enable system/com.apple.screensharing
+          # Set VNC password using the generated password
+          echo "$VNC_PASSWORD" | sudo /usr/bin/vncpasswd -storepasswd /Library/Preferences/com.apple.VNCSettings.txt
+          
+          # Enable Screen Sharing
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          # Alternative: direct systemsetup method
-          echo "$VNC_PASSWORD" | sudo tee /tmp/vncpass > /dev/null
-          sudo /usr/bin/vncpasswd -legacy -storepasswd /tmp/vncpass /Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null || true
-          sudo rm -f /tmp/vncpass
-          
-          # Restart services
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
-          sudo killall ARDAgent 2>/dev/null || true
-          
-          sleep 5
+          # Restart ARD Agent
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
 
       - name: Get Tailscale IP
         run: |
           # Wait for Tailscale to get IP
-          sleep 5
+          sleep 10
           
           retries=0
-          while [ $retries -lt 20 ]; do
-            TSIP=$(sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null || true)
+          while [ $retries -lt 10 ]; do
+            TSIP=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null)
             if [ ! -z "$TSIP" ]; then
               echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
-              echo "✓ Got Tailscale IP: $TSIP"
               break
             fi
-            echo "⏳ Waiting for Tailscale IP... attempt $((retries + 1))/20"
-            sleep 3
+            sleep 5
             retries=$((retries + 1))
           done
           
           if [ -z "$TSIP" ]; then
-            echo "❌ Failed to get Tailscale IP"
-            echo "Tailscale Status:"
-            sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale status
+            echo "Failed to get Tailscale IP"
             exit 1
           fi
 
@@ -112,12 +100,11 @@ jobs:
           echo ""
           echo "=== VNC ACCESS ==="
           echo "Address: $TAILSCALE_IP:5900"
-          echo "Username: runner (or leave blank)"
+          echo "Username: Yanzz"
           echo "Password: $VNC_PASSWORD"
           echo "=================="
           echo ""
           echo "Connect using VNC Viewer to: $TAILSCALE_IP"
-          echo "VNC Port: 5900"
           echo ""
           
           # Keep runner active
