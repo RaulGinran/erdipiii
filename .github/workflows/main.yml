@@ -57,17 +57,13 @@ jobs:
         run: |
           echo "Setting legacy VNC password..."
           
-          # -----------------------------------------------------------------
           # 1. Mengatur Password VNC (Ini berhasil)
           printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
-          # -----------------------------------------------------------------
           
           echo "Skipping user password setup..."
           
           echo "Activating ARD/VNC..."
-          # -----------------------------------------------------------------
           # 2. Menyalakan VNC (Ini berhasil dan menyalakan GUI)
-          # PERBAIKAN: Menghapus 3 baris '-login', '-name', '-password' yang ERROR
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -allowAccessFor -allUsers \
@@ -75,7 +71,6 @@ jobs:
             -configure -privs -all \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
             -restart -agent -console
-          # -----------------------------------------------------------------
           
           # Pastikan service-nya berjalan
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
@@ -107,8 +102,26 @@ jobs:
           echo "3. Use the Password above"
           echo ""
           
-          # Keep everything alive
+          # -----------------------------------------------------------------
+          # 3. MEMAKSA DESKTOP (FINDER) NYALA (Ini Kunci Anti-Black-Screen)
+          # -----------------------------------------------------------------
           while true; do
             echo "[$(date)] macOS VNC Active"
+            
+            # Keep display awake
+            caffeinate -u -t 1 &
+            
+            # Restart Finder if crashed (atau belum jalan)
+            if ! pgrep -x Finder > /dev/null; then
+              echo "Finder not running. Starting Finder..."
+              sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app &
+            fi
+
+            # Pastikan Dock juga jalan
+            if ! pgrep -x Dock > /dev/null; then
+              echo "Dock not running. Starting Dock..."
+              sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Dock.app &
+            fi
+            
             sleep 300
           done
