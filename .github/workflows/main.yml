@@ -1,4 +1,4 @@
-name: macOS VNC
+name: macOS VNC Access via Tailscale
 
 on:
   workflow_dispatch:
@@ -6,8 +6,8 @@ on:
 jobs:
   macos-vnc:
     runs-on: macos-latest
-    # Set timeout yang lebih wajar, 60 menit (3600 detik) biasanya sudah cukup
-    timeout-minutes: 3600
+    # Set timeout yang wajar
+    timeout-minutes: 60
 
     steps:
       - name: Generate VNC Password
@@ -16,22 +16,41 @@ jobs:
           echo "VNC_PASSWORD=$password" >> $GITHUB_ENV
           echo "✓ VNC Password: $password"
 
-      - name: Install Tailscale
+      - name: Install and Start Tailscale Manually
         run: |
           echo "Installing Tailscale..."
           brew install tailscale
           
-          echo "Starting Tailscale daemon..."
-          # Menggunakan launchctl untuk service yang lebih stabil di macOS runner
-          sudo launchctl load /usr/local/opt/tailscale/homebrew.mxcl.tailscale.plist
-          sleep 10
+          # Lokasi binary tailscaled di macOS runner
+          TS_BINARY="/opt/homebrew/opt/tailscale/bin/tailscaled"
+          TS_SOCKET="/var/run/tailscale/tailscaled.sock"
+          
+          echo "Starting Tailscale daemon manually..."
+          # Jalankan daemon di latar belakang (Background)
+          # Menggunakan sudo dan menentukan lokasi state/socket
+          # Buat direktori socket jika belum ada
+          sudo mkdir -p $(dirname $TS_SOCKET)
+          sudo $TS_BINARY --state=/var/lib/tailscale.state --socket=$TS_SOCKET &
+          
+          # Tunggu sebentar agar daemon siap
+          echo "⏳ Waiting 15 seconds for daemon to start..."
+          sleep 15
           
           echo "Connecting to Tailscale..."
-          sudo tailscale up \
+          # Gunakan socket path yang sama saat "up"
+          sudo tailscale --socket $TS_SOCKET up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-mac-${{ github.run_id }} \
-            --accept-routes
+            --accept-routes \
+            --timeout=30s
           
+          if [ $? -ne 0 ]; then
+            echo "❌ Tailscale connection failed. Check logs."
+            # Coba hentikan daemon jika gagal
+            sudo killall tailscaled 2>/dev/null || true
+            exit 1
+          fi
+
           echo "✓ Tailscale connected"
 
       - name: Get Tailscale IP
@@ -63,7 +82,7 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionEnabled -bool true
           sudo defaults write /Library/Preferences/com.apple.Displays.plist DisplayAnyUserSets -bool true
           
-          # Set explicit resolution (misalnya 1920x1080)
+          # Set explicit resolution (contoh: 1920x1080)
           RES="1920x1080"
           sudo defaults write /Library/Preferences/com.apple.windowserver "DisplayResolution" -string "$RES@1"
           
@@ -80,7 +99,7 @@ jobs:
           
           # Start WindowServer/Aqua (GUI) for runner user
           echo "Starting GUI session for runner user..."
-          # Memulai Finder/Dock seringkali memicu WindowServer
+          # Memulai Finder/Dock memicu WindowServer
           sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app &
           sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Dock.app &
           
@@ -134,8 +153,8 @@ jobs:
           echo "Password: $VNC_PASSWORD"
           echo "================================"
           echo ""
-          echo "TROUBLESHOOTING:"
-          echo "- Jika **layar hitam**: Tunggu **30-60 detik** lagi. Ini adalah waktu inisialisasi yang krusial."
+          echo "TROUBLESHOOTING LAYAR HITAM:"
+          echo "- Tunggu minimal **40-60 detik** setelah langkah ini selesai."
           echo "- Coba putuskan dan sambungkan kembali VNC (disconnect/reconnect)."
           echo "- Cek setelan mode warna (Color Depth) di VNC Viewer Anda (coba setting rendah, misal True Color)."
           echo ""
@@ -153,6 +172,5 @@ jobs:
               sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app &
             fi
             
-            # Ubah sleep menjadi lebih singkat agar lebih responsif jika ada crash
             sleep 60 
           done
