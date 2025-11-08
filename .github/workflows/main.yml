@@ -22,13 +22,21 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          # Download and install Tailscale
-          curl -o /tmp/tailscale.zip https://pkgs.tailscale.com/stable/tailscale_1.82.0_amd64.zip
-          unzip /tmp/tailscale.zip -d /tmp/
+          # Download Tailscale for macOS (using direct pkg link)
+          curl -L -o /tmp/Tailscale.pkg "https://pkgs.tailscale.com/stable/Tailscale-1.82.0-macos.pkg"
+          
+          # Install Tailscale
           sudo installer -pkg /tmp/Tailscale.pkg -target /
           
-          # Start Tailscale daemon
-          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-mac-${{ github.run_id }}
+          # Wait for installation to complete
+          sleep 5
+          
+          # Start Tailscale
+          open -a Tailscale
+          sleep 5
+          
+          # Connect to Tailscale
+          /Applications/Tailscale.app/Contents/MacOS/Tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-mac-${{ github.run_id }} --accept-routes
 
       - name: Enable VNC Screen Sharing
         run: |
