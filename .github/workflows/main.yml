@@ -51,10 +51,12 @@ jobs:
 
       - name: Enable VNC Screen Sharing
         run: |
-          # Set VNC password using perl (most reliable method)
-          printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+          # Enable auto-login for runner user
+          echo "Setting up auto-login..."
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser runner
           
-          # Enable Remote Management (ARD/VNC)
+          # Enable VNC (Remote Management)
+          echo "Enabling VNC..."
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -allowAccessFor -allUsers \
@@ -63,24 +65,29 @@ jobs:
             -agent \
             -privs -all
           
-          # Enable VNC for all users
+          # Enable VNC legacy mode
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -configure -clientopts -setvnclegacy -vnclegacy yes
           
-          # Enable Screen Sharing service
-          sudo launchctl enable system/com.apple.screensharing
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          # Set VNC password
+          echo "Setting VNC password..."
+          mkdir -p ~/Library/Preferences
+          printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
           
-          # Alternative: direct systemsetup method
-          echo "$VNC_PASSWORD" | sudo tee /tmp/vncpass > /dev/null
-          sudo /usr/bin/vncpasswd -legacy -storepasswd /tmp/vncpass /Library/Preferences/com.apple.VNCSettings.txt 2>/dev/null || true
-          sudo rm -f /tmp/vncpass
+          # Start GUI session for runner user
+          echo "Starting GUI session..."
+          sudo launchctl asuser $(id -u runner) launchctl load -w /System/Library/LaunchAgents/com.apple.loginwindow.plist 2>/dev/null || true
           
-          # Restart services
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
-          sudo killall ARDAgent 2>/dev/null || true
+          # Prevent screen sleep
+          sudo pmset -a displaysleep 0
+          sudo pmset -a sleep 0
           
-          sleep 5
+          # Force wake display
+          caffeinate -u -t 5 &
+          
+          sleep 10
+          
+          echo "✓ VNC and GUI session enabled"
 
       - name: Get Tailscale IP
         run: |
@@ -127,9 +134,12 @@ jobs:
           echo "Connect using VNC Viewer to: $TAILSCALE_IP"
           echo "VNC Port: 5900"
           echo ""
+          echo "NOTE: If you see black screen, wait 30 seconds for GUI to load"
+          echo ""
           
-          # Keep runner active
+          # Keep display awake and runner active
           while true; do
             echo "[$(date)] macOS VNC Active - Use Ctrl+C in workflow to terminate"
+            caffeinate -u -t 1 &
             sleep 300
           done
