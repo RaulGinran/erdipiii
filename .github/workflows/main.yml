@@ -32,15 +32,6 @@ jobs:
           tailscale ip -4 | tee tailscale_ip.txt
           echo "TAILSCALE_IP=$(cat tailscale_ip.txt)" >> $GITHUB_ENV
 
-      - name: Install StarDesk
-        shell: bash
-        run: |
-          mkdir -p ~/Downloads/stardesk
-          cd ~/Downloads/stardesk
-          curl -L -o StarDesk_1.0.1.dmg "https://dl.stardesk.net/StarDesk_Setup_V1.0.1.5404_0926024227_stardesk_nochannel.exe?n=StarDesk_1.0.1.exe"
-          echo "StarDesk DMG downloaded."
-          # kalau nanti StarDesk ada versi DMG/macOS resmi, ganti URL di atas
-
       - name: Show connection info & keep alive
         shell: bash
         run: |
