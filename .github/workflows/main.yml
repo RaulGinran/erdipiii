@@ -1,92 +1,4 @@
-name: macOS Tailscale + TigerVNC (minimal X11)
-
-on:
-  workflow_dispatch:
-    inputs:
-      VNC_PASS:
-        description: "Opsional: VNC password (kalau kosong, akan di-generate & ditampilkan)"
-        required: false
-        default: ""
-      GEOMETRY:
-        description: "Resolusi VNC (mis. 1920x1080)"
-        required: false
-        default: "1920x1080"
-
-jobs:
-  macos-remote:
-    runs-on: macos-latest
-    timeout-minutes: 360
-
-    steps:
-      - name: Info runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          sw_vers
-          whoami
-          echo "HOME=$HOME"
-
-      - name: Ensure Homebrew in PATH
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v brew >/dev/null 2>&1; then
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          fi
-          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
-          eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
-          brew --version
-
-      - name: Install tailscale
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew update
-          brew install tailscale || brew upgrade tailscale || true
-          command -v tailscale && tailscale version
-
-      - name: Install TigerVNC (try both formula names)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if brew info tigervnc >/dev/null 2>&1; then
-            brew install tigervnc || brew upgrade tigervnc || true
-          else
-            brew install tiger-vnc || brew upgrade tiger-vnc || true
-          fi
-          command -v vncserver || true
-          command -v Xtigervnc || true
-
-      - name: Start tailscaled & connect
-        shell: bash
-        env:
-          TS_AUTH: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${TS_AUTH:-}" ]; then
-            echo "Missing secret: TAILSCALE_AUTH_KEY" >&2; exit 1
-          fi
-          sudo nohup tailscaled --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
-
-          for i in $(seq 1 20); do
-            tailscale status >/dev/null 2>&1 && break || sleep 1
-          done
-
-          HOST="gha-macos-${GITHUB_RUN_ID}"
-          sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}" --accept-routes --accept-dns || \
-          sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}"
-
-          ip4="$(tailscale ip -4 | awk '/^ *100\./{print $1;exit}')"
-          if [ -z "$ip4" ]; then
-            echo "No Tailscale IPv4 yet"
-            tailscale status || true
-            tail -n 100 /tmp/tailscaled.log || true
-            exit 1
-          fi
-          echo "TAILSCALE_IP=$ip4" >> "$GITHUB_ENV"
-          echo "Tailscale IP: $ip4"
-
-      - name: Configure VNC & launch Xvnc
+- name: Configure VNC & launch Xtigervnc directly (no wrapper)
         shell: bash
         env:
           VNC_PASS_INPUT: ${{ github.event.inputs.VNC_PASS }}
@@ -94,7 +6,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Password: pakai input kalau ada; kalau kosong generate & tampilkan
+          # ---- 1) Password VNC ----
           if [ -n "${VNC_PASS_INPUT:-}" ]; then
             VNC_PASS="$VNC_PASS_INPUT"
           else
@@ -104,8 +16,6 @@ jobs:
           echo "VNC_PASS=$VNC_PASS" >> "$GITHUB_ENV"
 
           mkdir -p "$HOME/.vnc"
-
-          # Tulis passwd terenkripsi
           if command -v vncpasswd >/dev/null 2>&1; then
             printf "%s\n" "$VNC_PASS" | vncpasswd -f > "$HOME/.vnc/passwd"
           else
@@ -113,46 +23,54 @@ jobs:
           fi
           chmod 600 "$HOME/.vnc/passwd"
 
-          # Session minimal: cuma xterm (tanpa WM, biar nggak tergantung brew)
-          printf '%s\n' \
-            '#!/bin/sh' \
-            'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"' \
-            'export LANG=en_US.UTF-8' \
-            'xterm &' \
-            > "$HOME/.vnc/xstartup"
-          chmod +x "$HOME/.vnc/xstartup"
+          # ---- 2) Temukan Xtigervnc ----
+          XTIGERVNC="$(command -v Xtigervnc || true)"
+          if [ -z "$XTIGERVNC" ]; then
+            # coba path brew
+            for p in /opt/homebrew/bin/Xtigervnc /usr/local/bin/Xtigervnc $(brew --prefix 2>/dev/null)/bin/Xtigervnc; do
+              [ -x "$p" ] && XTIGERVNC="$p" && break
+            done
+          fi
+          if [ -z "$XTIGERVNC" ]; then
+            echo "Xtigervnc not found. Check TigerVNC install step." >&2
+            exit 1
+          fi
+          echo "Using Xtigervnc at: $XTIGERVNC"
 
-          # Kill kalau ada yang lama
-          vncserver -kill :1 >/dev/null 2>&1 || true
+          # ---- 3) Matikan instance lama jika ada ----
           pkill -f Xtigervnc || true
           pkill -f Xvnc || true
 
+          # ---- 4) Start Xtigervnc on display :1, port 5900 ----
           GEOM="${GEOM:-1920x1080}"
-          nohup vncserver :1 -geometry "$GEOM" -rfbport 5900 > /tmp/vncserver.log 2>&1 &
+          LOG_VNC="/tmp/vncserver.log"
+          nohup "$XTIGERVNC" :1 \
+            -geometry "$GEOM" \
+            -desktop "GHA VNC" \
+            -rfbport 5900 \
+            -localhost no \
+            -SecurityTypes VncAuth \
+            -rfbauth "$HOME/.vnc/passwd" \
+            -AlwaysShared=1 \
+            -IdleTimeout=0 \
+            -MaxDisconnectionTime=0 \
+            -MaxConnectionTime=0 \
+            > "$LOG_VNC" 2>&1 &
 
-          sleep 2
-          echo "===== /tmp/vncserver.log ====="
-          tail -n +1 /tmp/vncserver.log || true
-          echo "=============================="
+          # Tunggu listening
+          for i in $(seq 1 15); do
+            sleep 1
+            if lsof -iTCP:5900 -sTCP:LISTEN >/dev/null 2>&1; then
+              break
+            fi
+          done
+          echo "===== $LOG_VNC (tail) ====="
+          tail -n 50 "$LOG_VNC" || true
+          echo "==========================="
+
+          # ---- 5) Launch xterm ke display :1 (biar ada window) ----
+          if command -v xterm >/dev/null 2>&1; then
+            ( DISPLAY=:1 nohup xterm >/tmp/xterm.log 2>&1 & ) || true
+          fi
 
           echo "VNC_PORT=5900" >> "$GITHUB_ENV"
-
-      - name: Connection info & keep alive
-        shell: bash
-        timeout-minutes: 360
-        run: |
-          echo ""
-          echo "=== CONNECTION INFO (TigerVNC X11) ==="
-          echo "Tailscale IP : ${TAILSCALE_IP}"
-          echo "VNC address  : ${TAILSCALE_IP}:5900"
-          echo "VNC password : ${VNC_PASS}"
-          echo "Geometry     : ${GEOMETRY:-1920x1080}"
-          echo "Log files    : /tmp/tailscaled.log , /tmp/vncserver.log"
-          echo "======================================"
-          echo ""
-          while true; do
-            date
-            tailscale status | head -n 20 || true
-            ps aux | egrep 'vncserver|Xvnc|Xtigervnc' | egrep -v egrep || true
-            sleep 300
-          done
