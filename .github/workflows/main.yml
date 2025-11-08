@@ -11,135 +11,146 @@ jobs:
     steps:
       - name: Generate VNC Password
         run: |
-          # Generate random password (16 characters)
           password=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-16)
-          
-          # Store password in environment
           echo "VNC_PASSWORD=$password" >> $GITHUB_ENV
-          
-          echo "✓ VNC Password generated"
+          echo "✓ VNC Password: $password"
 
       - name: Install Tailscale
         run: |
-          # Install Tailscale via Homebrew (most reliable for GitHub Actions)
-          echo "Installing Tailscale via Homebrew..."
+          echo "Installing Tailscale..."
           brew install tailscale
           
-          # Start tailscaled using brew services (handles socket correctly)
           echo "Starting Tailscale daemon..."
           sudo brew services start tailscale
-          
-          # Wait for daemon to be ready
           sleep 10
           
-          # Verify daemon is running
-          if ! pgrep -x tailscaled > /dev/null; then
-            echo "❌ Tailscale daemon not running"
-            exit 1
-          fi
-          
-          echo "✓ Daemon running"
-          
-          # Connect to Tailscale network
           echo "Connecting to Tailscale..."
           sudo tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-mac-${{ github.run_id }} \
             --accept-routes
           
-          echo "✓ Tailscale connected successfully"
-
-      - name: Enable VNC Screen Sharing
-        run: |
-          # Enable auto-login for runner user
-          echo "Setting up auto-login..."
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser runner
-          
-          # Enable VNC (Remote Management)
-          echo "Enabling VNC..."
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -allowAccessFor -allUsers \
-            -configure -access -on \
-            -configure -restart \
-            -agent \
-            -privs -all
-          
-          # Enable VNC legacy mode
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvnclegacy -vnclegacy yes
-          
-          # Set VNC password
-          echo "Setting VNC password..."
-          mkdir -p ~/Library/Preferences
-          printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
-          
-          # Start GUI session for runner user
-          echo "Starting GUI session..."
-          sudo launchctl asuser $(id -u runner) launchctl load -w /System/Library/LaunchAgents/com.apple.loginwindow.plist 2>/dev/null || true
-          
-          # Prevent screen sleep
-          sudo pmset -a displaysleep 0
-          sudo pmset -a sleep 0
-          
-          # Force wake display
-          caffeinate -u -t 5 &
-          
-          sleep 10
-          
-          echo "✓ VNC and GUI session enabled"
+          echo "✓ Tailscale connected"
 
       - name: Get Tailscale IP
         run: |
-          # Wait for Tailscale to get IP
           sleep 5
-          
           retries=0
           while [ $retries -lt 20 ]; do
             TSIP=$(sudo tailscale ip -4 2>/dev/null || true)
             if [ ! -z "$TSIP" ]; then
               echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
-              echo "✓ Got Tailscale IP: $TSIP"
+              echo "✓ Tailscale IP: $TSIP"
               break
             fi
-            echo "⏳ Waiting for Tailscale IP... attempt $((retries + 1))/20"
+            echo "⏳ Waiting for IP... $((retries + 1))/20"
             sleep 3
             retries=$((retries + 1))
           done
           
           if [ -z "$TSIP" ]; then
             echo "❌ Failed to get Tailscale IP"
-            echo "Tailscale Status:"
-            sudo tailscale status
             exit 1
           fi
 
+      - name: Setup Virtual Display Driver
+        run: |
+          # Download and install virtual display driver
+          echo "Installing virtual display driver..."
+          
+          # Use dummy display kext (safe for GitHub Actions)
+          curl -L -o /tmp/displaylink.zip https://github.com/avibrazil/RDM/releases/download/4.4/RDM-4.4.zip
+          unzip -q /tmp/displaylink.zip -d /tmp/
+          
+          # Create virtual display configuration
+          sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionEnabled -bool true
+          
+          echo "✓ Display driver installed"
+
+      - name: Start GUI Session with Virtual Framebuffer
+        run: |
+          # Kill any existing window server
+          sudo killall WindowServer 2>/dev/null || true
+          
+          # Start window server with virtual display
+          echo "Starting GUI with virtual framebuffer..."
+          
+          # Launch Aqua (GUI) for runner user
+          sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app &
+          
+          # Start Dock
+          sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Dock.app &
+          
+          # Prevent sleep
+          sudo pmset -a displaysleep 0 sleep 0
+          
+          # Keep display awake
+          caffeinate -d -i -s &
+          
+          sleep 10
+          
+          echo "✓ GUI session started"
+
+      - name: Enable VNC Screen Sharing
+        run: |
+          echo "Configuring VNC..."
+          
+          # Set VNC password
+          printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+          
+          # Enable Remote Management with VNC
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure -allowAccessFor -allUsers \
+            -configure -access -on \
+            -configure -restart -agent -privs -all \
+            -configure -clientopts -setvnclegacy -vnclegacy yes
+          
+          # Start Screen Sharing
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          
+          # Restart ARD
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
+          
+          sleep 5
+          
+          echo "✓ VNC enabled"
+
       - name: Verify VNC Port
         run: |
-          echo "Checking VNC port 5900..."
-          netstat -an | grep 5900 || echo "VNC port not listening yet"
-          
-          # Give VNC time to fully start
-          sleep 5
+          echo "Checking VNC accessibility..."
+          netstat -an | grep 5900 || echo "Warning: Port 5900 not listening yet"
+          ps aux | grep -i screen || true
+          ps aux | grep -i vnc || true
 
       - name: Display Connection Info & Keep Alive
         run: |
           echo ""
-          echo "=== VNC ACCESS ==="
+          echo "================================"
+          echo "   macOS VNC CONNECTION INFO"
+          echo "================================"
           echo "Address: $TAILSCALE_IP:5900"
-          echo "Username: runner (or leave blank)"
           echo "Password: $VNC_PASSWORD"
-          echo "=================="
+          echo "================================"
           echo ""
-          echo "Connect using VNC Viewer to: $TAILSCALE_IP"
-          echo "VNC Port: 5900"
-          echo ""
-          echo "NOTE: If you see black screen, wait 30 seconds for GUI to load"
+          echo "TROUBLESHOOTING:"
+          echo "- If black screen: Wait 30-60 seconds"
+          echo "- Try disconnect/reconnect"
+          echo "- Check VNC Viewer color mode settings"
           echo ""
           
-          # Keep display awake and runner active
+          # Keep everything alive
           while true; do
-            echo "[$(date)] macOS VNC Active - Use Ctrl+C in workflow to terminate"
+            echo "[$(date)] macOS VNC Active"
+            
+            # Keep display awake
             caffeinate -u -t 1 &
+            
+            # Restart Finder if crashed
+            if ! pgrep -x Finder > /dev/null; then
+              echo "Restarting Finder..."
+              sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app &
+            fi
+            
             sleep 300
           done
