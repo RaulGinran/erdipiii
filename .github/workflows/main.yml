@@ -30,20 +30,27 @@ jobs:
           # Wait for installation
           sleep 3
           
-          # Start Tailscale daemon using launchd
-          sudo launchctl load /Library/LaunchDaemons/com.tailscale.tailscaled.plist 2>/dev/null || true
-          
-          # Wait for daemon to be ready
+          # Start tailscaled daemon manually in background
           echo "Starting Tailscale daemon..."
+          sudo /Applications/Tailscale.app/Contents/MacOS/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+          
+          # Wait for daemon socket to be ready
           sleep 10
+          
+          # Verify daemon is running
+          if ! pgrep -x tailscaled > /dev/null; then
+            echo "❌ Tailscale daemon failed to start"
+            exit 1
+          fi
+          
+          echo "✓ Daemon running"
           
           # Connect to Tailscale network
           echo "Connecting to Tailscale..."
           sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-mac-${{ github.run_id }} \
-            --accept-routes \
-            --timeout=60s
+            --accept-routes
           
           echo "✓ Tailscale connected successfully"
 
