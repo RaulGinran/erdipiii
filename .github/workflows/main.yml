@@ -6,6 +6,7 @@ on:
 jobs:
   macos-vnc:
     runs-on: macos-latest
+    # Set timeout yang lebih wajar, 60 menit (3600 detik) biasanya sudah cukup
     timeout-minutes: 3600
 
     steps:
@@ -21,7 +22,8 @@ jobs:
           brew install tailscale
           
           echo "Starting Tailscale daemon..."
-          sudo brew services start tailscale
+          # Menggunakan launchctl untuk service yang lebih stabil di macOS runner
+          sudo launchctl load /usr/local/opt/tailscale/homebrew.mxcl.tailscale.plist
           sleep 10
           
           echo "Connecting to Tailscale..."
@@ -53,44 +55,42 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Virtual Display Driver
+      - name: Setup Virtual Display Driver & Resolution
         run: |
-          echo "Configuring system display settings..."
+          echo "Configuring system display settings and resolution..."
           
           # Enable display resolution configuration
           sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionEnabled -bool true
           sudo defaults write /Library/Preferences/com.apple.Displays.plist DisplayAnyUserSets -bool true
           
-          # Set default resolution
-          sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionDisabled -bool false
+          # Set explicit resolution (misalnya 1920x1080)
+          RES="1920x1080"
+          sudo defaults write /Library/Preferences/com.apple.windowserver "DisplayResolution" -string "$RES@1"
           
           # Force enable all displays
           sudo defaults write /Library/Preferences/com.apple.Displays AppleDisplay -dict-add "DisplayVendorID" -int 0
           sudo defaults write /Library/Preferences/com.apple.Displays AppleDisplay -dict-add "DisplayProductID" -int 0
           
-          echo "✓ Display settings configured"
+          echo "✓ Display settings configured to $RES"
 
-      - name: Start GUI Session with Virtual Framebuffer
+      - name: Start GUI Session and Wait
         run: |
           # Kill any existing window server
           sudo killall WindowServer 2>/dev/null || true
           
-          # Start window server with virtual display
-          echo "Starting GUI with virtual framebuffer..."
-          
-          # Launch Aqua (GUI) for runner user
+          # Start WindowServer/Aqua (GUI) for runner user
+          echo "Starting GUI session for runner user..."
+          # Memulai Finder/Dock seringkali memicu WindowServer
           sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app &
-          
-          # Start Dock
           sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Dock.app &
           
-          # Prevent sleep
+          # Mencegah tidur/sleep
           sudo pmset -a displaysleep 0 sleep 0
-          
-          # Keep display awake
           caffeinate -d -i -s &
           
-          sleep 10
+          # Waktu tunggu yang lebih lama (20 detik) untuk inisialisasi GUI
+          echo "⏳ Waiting 20 seconds for GUI to fully initialize..."
+          sleep 20
           
           echo "✓ GUI session started"
 
@@ -101,21 +101,19 @@ jobs:
           # Set VNC password
           printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
           
-          # Enable Remote Management with VNC
+          # Mengaktifkan Remote Management (VNC) dan mengatur izin
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -allowAccessFor -allUsers \
+            -activate -configure -allowAccessFor -allUsers \
             -configure -access -on \
-            -configure -restart -agent -privs -all \
-            -configure -clientopts -setvnclegacy -vnclegacy yes
-          
-          # Start Screen Sharing
+            -configure -clientopts -setvnclegacy -vnclegacy yes \
+            -configure -access -on -privs -all \
+            -restart -agent -console
+            
+          # Memuat ulang layanan Screen Sharing
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          # Restart ARD
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
-          
-          sleep 5
+          # Tunggu sebentar setelah aktivasi
+          sleep 10
           
           echo "✓ VNC enabled"
 
@@ -137,9 +135,9 @@ jobs:
           echo "================================"
           echo ""
           echo "TROUBLESHOOTING:"
-          echo "- If black screen: Wait 30-60 seconds"
-          echo "- Try disconnect/reconnect"
-          echo "- Check VNC Viewer color mode settings"
+          echo "- Jika **layar hitam**: Tunggu **30-60 detik** lagi. Ini adalah waktu inisialisasi yang krusial."
+          echo "- Coba putuskan dan sambungkan kembali VNC (disconnect/reconnect)."
+          echo "- Cek setelan mode warna (Color Depth) di VNC Viewer Anda (coba setting rendah, misal True Color)."
           echo ""
           
           # Keep everything alive
@@ -155,5 +153,6 @@ jobs:
               sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app &
             fi
             
-            sleep 300
+            # Ubah sleep menjadi lebih singkat agar lebih responsif jika ada crash
+            sleep 60 
           done
