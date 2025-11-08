@@ -13,13 +13,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 360
 
-    env:
-      # GUNAKAN secrets untuk data sensitif:
-      # - TAILSCALE_AUTH_KEY : required
-      # - VNC_PASS (optional) : jika tidak ada, workflow generate random
-      # - ROBLOX_SHA256 (optional) : untuk verifikasi jika Anda punya checksum
     steps:
-
       - name: Print runner info
         shell: bash
         run: |
