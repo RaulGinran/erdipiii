@@ -1,121 +1,255 @@
-name: macOS VNC
+name: macOS: Tailscale + VNC + Roblox installer
 
 on:
   workflow_dispatch:
+    inputs:
+      ROBLOX_URL:
+        description: "Optional: direct URL to Roblox .dmg (will fallback to CDN lookup if empty)"
+        required: false
+        default: ""
 
 jobs:
-  macos-vnc:
+  macos-remote:
     runs-on: macos-latest
     timeout-minutes: 360
 
+    env:
+      # GUNAKAN secrets untuk data sensitif:
+      # - TAILSCALE_AUTH_KEY : required
+      # - VNC_PASS (optional) : jika tidak ada, workflow generate random
+      # - ROBLOX_SHA256 (optional) : untuk verifikasi jika Anda punya checksum
     steps:
-      - name: Generate credentials
-        shell: bash
-        run: |
-          VNC_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-8)"
-          NEW_ADMIN="ghvnc"
-          NEW_ADMIN_PW="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-16)"
-          echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
-          echo "NEW_ADMIN=$NEW_ADMIN" >> "$GITHUB_ENV"
-          echo "NEW_ADMIN_PW=$NEW_ADMIN_PW" >> "$GITHUB_ENV"
-          echo "Generated VNC and admin credentials"
 
-      - name: Install Tailscale
+      - name: Print runner info
         shell: bash
         run: |
-          brew install tailscale
-          sudo brew services start tailscale
-          sleep 8
-          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="gh-mac-${{ github.run_id }}" --accept-routes
-          echo "Tailscale up"
+          sw_vers
+          uname -a
+          echo "Runner: $RUNNER_NAME / $RUNNER_OS / $RUNNER_ARCH"
 
-      - name: Get Tailscale IP
+      - name: Ensure Homebrew present
         shell: bash
         run: |
-          for i in {1..20}; do
-            TSIP="$(sudo tailscale ip -4 2>/dev/null | head -n1 || true)"
-            if [ -n "$TSIP" ]; then
-              echo "TAILSCALE_IP=$TSIP" >> "$GITHUB_ENV"
-              echo "Tailscale IP: $TSIP"
-              exit 0
-            fi
-            echo "Waiting for IP... $i/20"
-            sleep 3
+          if ! command -v brew >/dev/null 2>&1; then
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            # Add brew to PATH for macOS runners (non-interactive)
+            eval "$(/opt/homebrew/bin/brew shellenv || true)"
+            eval "$(/usr/local/bin/brew shellenv || true)"
+          fi
+          brew update
+
+      - name: Install Tailscale CLI & TigerVNC
+        shell: bash
+        run: |
+          brew install tailscale tigervnc || (brew upgrade tailscale tigervnc || true)
+          tailscale version || true
+          vncserver -version || true
+
+      - name: Start tailscaled (daemon) and tailscale up
+        shell: bash
+        env:
+          TS_AUTH: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          if [ -z "${TS_AUTH:-}" ]; then
+            echo "Missing secret: TAILSCALE_AUTH_KEY" >&2
+            exit 1
+          fi
+
+          # start tailscaled in background (userspace-networking more portable)
+          sudo nohup tailscaled --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
+
+          # Wait for daemon
+          for i in $(seq 1 20); do
+            tailscale status >/dev/null 2>&1 && break || sleep 1
           done
-          echo "Failed to get Tailscale IP"
-          exit 1
 
-      - name: Create GUI admin user
-        shell: bash
-        run: |
-          echo "Creating admin user: $NEW_ADMIN"
-          # Biarkan macOS pilih UID sendiri (hindari bentrok)
-          sudo sysadminctl -addUser "$NEW_ADMIN" -password "$NEW_ADMIN_PW" -admin -home "/Users/$NEW_ADMIN" || true
-          # Verifikasi user ada
-          if dscl . -read "/Users/$NEW_ADMIN" >/dev/null 2>&1; then
-            echo "Admin user present"
+          HOST="gha-macos-${GITHUB_RUN_ID}"
+          sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}" --accept-routes || sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}" || true
+
+          # Get Tailscale IPv4 (100.x)
+          ip4=$(tailscale ip -4 2>/dev/null | grep -E '^\s*100\.' | head -n1 | xargs || true)
+          if [ -z "$ip4" ]; then
+            echo "No Tailscale IPv4 found yet; dumping tailscale status/log"
+            tailscale status || true
+            tail -n 200 /tmp/tailscaled.log || true
+            # don't fail hard here, but the next steps expect TAILSCALE_IP
           else
-            echo "❌ Admin user not present"; exit 1
+            echo "TAILSCALE_IP=$ip4" >> "$GITHUB_ENV"
+            echo "Tailscale IP: $ip4"
           fi
-          NEW_ADMIN_UID="$(id -u "$NEW_ADMIN" 2>/dev/null || true)"
-          echo "NEW_ADMIN_UID=${NEW_ADMIN_UID}" >> "$GITHUB_ENV"
-          echo "Admin UID: ${NEW_ADMIN_UID:-unknown}"
 
-      - name: Enable Remote Management + Legacy VNC
+      - name: Create VNC user (ghvnc) and set password (or generate)
         shell: bash
+        env:
+          VNC_PASS_SECRET: ${{ secrets.VNC_PASS }}
         run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on \
-            -configure -allowAccessFor -allUsers -privs -all \
-            -configure -clientopts -setvnclegacy -vnclegacy yes \
-            -configure -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
-            -restart -agent -console
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sleep 5
-          echo "ARD + VNC enabled"
+          set -euo pipefail
 
-      - name: Verify VNC service
-        shell: bash
-        run: |
-          if lsof -nP -iTCP:5900 -sTCP:LISTEN >/dev/null 2>&1; then
-            echo "Port 5900 is listening"
+          USER=ghvnc
+          # If secret provided, use it; otherwise generate a random password
+          if [ -n "${VNC_PASS_SECRET:-}" ]; then
+            PASS="${VNC_PASS_SECRET}"
           else
-            echo "Port 5900 not listening yet"
+            PASS="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || echo "ghVNC$(date +%s)")"
+            echo "::add-mask::$PASS"
           fi
-          ps aux | egrep -i "ScreenSharing|RemoteManagement|ARDAgent" | grep -v egrep || true
 
-      - name: Connection info & keep alive
+          # Create user if not exists
+          if ! id -u "$USER" >/dev/null 2>&1; then
+            sudo sysadminctl -addUser "$USER" -fullName "GH VNC User" -password "$PASS" -home "/Users/$USER" -admin
+            sudo createhomedir -c -u "$USER" >/dev/null 2>&1 || true
+          else
+            # update password
+            sudo dscl . -passwd /Users/"$USER" "$PASS"
+          fi
+
+          # Ensure proper ownership/home
+          sudo chown -R "$USER":staff "/Users/$USER" || true
+          echo "SSH / VNC user: $USER"
+          echo "VNC_PASS_SET=1" >> "$GITHUB_ENV"
+          # DO NOT echo the password in logs unmasked
+          echo "VNC_USER=$USER" >> "$GITHUB_ENV"
+          # store the pass temporarily in env for the vnc setup step
+          echo "VNC_PASS=$PASS" >> "$GITHUB_ENV"
+
+      - name: Configure TigerVNC password & launch VNC server (:0 -> 5900)
         shell: bash
         run: |
-          # Matikan 'exit on error' supaya loop tidak mati kalau ada perintah non-kritis gagal
-          set +e
-
-          printf "\n==============================\n"
-          printf "   macOS VNC CONNECTION INFO\n"
-          printf "==============================\n"
-          printf "Address (Tailscale): %s:5900\n" "${TAILSCALE_IP:-unknown}"
-          printf "VNC Password       : %s\n" "${VNC_PASSWORD:-unknown}"
-          printf "------------------------------\n"
-          printf "macOS GUI user     : %s\n" "${NEW_ADMIN:-ghvnc}"
-          printf "macOS GUI password : %s\n" "${NEW_ADMIN_PW:-<hidden>}"
-          printf "==============================\n\n"
-
-          echo "How to connect:"
-          echo "1) In your VNC client, connect to \$TAILSCALE_IP:5900 and use the VNC password above."
-          echo "2) At the macOS login window, sign in with the GUI user and password above."
-
-          # Opsional: start Finder untuk user GUI jika ada UID
-          if [ -n "${NEW_ADMIN_UID:-}" ]; then
-            sudo launchctl asuser "${NEW_ADMIN_UID}" /usr/bin/open -a /System/Library/CoreServices/Finder.app >/dev/null 2>&1 || true
+          set -euo pipefail
+          USER=${VNC_USER:-ghvnc}
+          PASS=${VNC_PASS:-}
+          if [ -z "$PASS" ]; then
+            echo "VNC password missing" >&2
+            exit 1
           fi
 
-          # Loop keep-alive
-          while true; do
-            echo "[$(date)] macOS VNC Active"
-            caffeinate -u -t 2 >/dev/null 2>&1 || true
-            if [ -n "${NEW_ADMIN_UID:-}" ]; then
-              pgrep -x Finder >/dev/null 2>&1 || sudo launchctl asuser "${NEW_ADMIN_UID}" /usr/bin/open -a /System/Library/CoreServices/Finder.app >/dev/null 2>&1 || true
+          # Prepare .vnc dir in user's home
+          HOME_DIR="/Users/$USER"
+          sudo -u "$USER" mkdir -p "$HOME_DIR/.vnc"
+          # Create password file - use vncpasswd -f if available
+          # vncpasswd -f reads password from stdin and outputs encoded form
+          printf "%s\n" "$PASS" | sudo -u "$USER" /opt/homebrew/bin/vncpasswd -f > "$HOME_DIR/.vnc/passwd" 2>/dev/null || \
+            printf "%s\n" "$PASS" | sudo -u "$USER" vncpasswd -f > "$HOME_DIR/.vnc/passwd"
+          sudo chmod 600 "$HOME_DIR/.vnc/passwd"
+          sudo chown "$USER":staff "$HOME_DIR/.vnc/passwd"
+
+          # Kill any existing vncserver instances for that user
+          sudo pkill -u "$USER" Xtightvnc || true
+          sudo pkill -u "$USER" Xvnc || true
+          sudo pkill -u "$USER" vncserver || true
+
+          # Launch vncserver as that user, display :0 mapped to 5900 (use :1 -> 5901 by default)
+          # We'll use display :0 so remote VNC client connects to <IP>:5900
+          # But TigerVNC typically uses :1 -> 5901; to bind to 5900 we use -rfbport 5900
+          sudo -u "$USER" /opt/homebrew/bin/vncserver -geometry 1920x1200 -rfbport 5900 :1 >/tmp/vncserver.log 2>&1 &
+
+          sleep 2
+          tail -n +1 /tmp/vncserver.log || true
+
+          echo "VNC started (display :1 -> TCP 5900)."
+          # Expose info
+          echo "VNC_PORT=5900" >> "$GITHUB_ENV"
+
+      - name: (Optional) Download & Install Roblox (macOS)
+        shell: bash
+        if: always()
+        env:
+          ROBLOX_URL_INPUT: ${{ github.event.inputs.ROBLOX_URL }}
+        run: |
+          set -euo pipefail
+          TMPDIR="$(mktemp -d)"
+          cd "$TMPDIR"
+
+          # If user provided direct URL, try that first
+          if [ -n "${ROBLOX_URL_INPUT:-}" ]; then
+            URL="${ROBLOX_URL_INPUT}"
+          else
+            # Query Roblox service to get latest Mac client version string then download
+            # This endpoint returns a JSON with version for MacPlayer (community-discovered)
+            VER_JSON="$(curl -fsS 'https://clientsettings.roblox.com/v2/client-version/MacPlayer' || true)"
+            VER="$(echo "$VER_JSON" | grep -Eo 'version-[0-9A-Za-z-]+' || true)"
+            if [ -z "$VER" ]; then
+              # fallback to a common CDN filename pattern
+              echo "Could not fetch version string; attempting generic CDN path."
+              URL="https://setup.rbxcdn.com/Roblox.dmg"
+            else
+              # Construct likely CDN URL: https://setup.rbxcdn.com/mac/$VER-Roblox.dmg
+              URL="https://setup.rbxcdn.com/mac/${VER}-Roblox.dmg"
             fi
+          fi
+
+          echo "Attempting download: $URL"
+          curl -fL --retry 5 -o Roblox.dmg "$URL" || ( echo "Download failed: $URL" >&2; ls -la; exit 1 )
+
+          if [ -n "${{ secrets.ROBLOX_SHA256 || '' }}" ]; then
+            echo "Verifying checksum..."
+            actual="$(shasum -a 256 Roblox.dmg | awk '{print $1}')"
+            if [ "$actual" != "${{ secrets.ROBLOX_SHA256 }}" ]; then
+              echo "Checksum mismatch (expected secret ROBLOX_SHA256). Aborting." >&2
+              exit 1
+            fi
+          fi
+
+          # Mount DMG
+          MOUNT_POINT=$(hdiutil attach Roblox.dmg -nobrowse -quiet | awk '/Volumes/ {for(i=1;i<=NF;i++){ if($i ~ /^\\//) {print $i; exit}}}')
+          if [ -z "$MOUNT_POINT" ]; then
+            # try listing
+            hdiutil attach Roblox.dmg -nobrowse -quiet
+            MOUNT_POINT=$(ls /Volumes | grep -i Roblox || true)
+            MOUNT_POINT="/Volumes/$MOUNT_POINT"
+          fi
+          echo "Mounted at: $MOUNT_POINT"
+
+          # Try to find the app inside mount
+          APP_PATH="$(find "$MOUNT_POINT" -maxdepth 2 -type d -name 'Roblox.app' -print -quit || true)"
+          if [ -z "$APP_PATH" ]; then
+            # Some installers put package inside
+            PKG="$(find "$MOUNT_POINT" -maxdepth 2 -type f -name '*.pkg' -print -quit || true)"
+            if [ -n "$PKG" ]; then
+              sudo installer -pkg "$PKG" -target /
+            else
+              echo "Roblox.app not found in DMG; listing $MOUNT_POINT:" || true
+              ls -la "$MOUNT_POINT" || true
+              hdiutil detach "$MOUNT_POINT" -quiet || true
+              exit 1
+            fi
+          else
+            echo "Found app: $APP_PATH"
+            sudo cp -R "$APP_PATH" /Applications/
+          fi
+
+          # Unmount
+          if [ -n "$MOUNT_POINT" ]; then
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+          fi
+
+          # Basic check
+          if [ -d "/Applications/Roblox.app" ]; then
+            echo "Roblox installed to /Applications/Roblox.app"
+          else
+            echo "Roblox install failed or not found in /Applications" >&2
+            ls -la /Applications | head -n 200 || true
+          fi
+
+      - name: Print connection info and keep alive
+        shell: bash
+        timeout-minutes: 360
+        run: |
+          echo ""
+          echo "=== CONNECTION INFO ==="
+          echo "Tailscale IP : ${TAILSCALE_IP:-(not-found)}"
+          echo "VNC address : ${TAILSCALE_IP:-(ip)}:5900"
+          echo "VNC user    : ${VNC_USER:-ghvnc}"
+          echo "VNC port    : ${VNC_PORT:-5900}"
+          echo "Roblox path : /Applications/Roblox.app"
+          echo "tailscaled log: /tmp/tailscaled.log"
+          echo "========================"
+          echo ""
+
+          # Keep job alive so you can connect
+          while true; do
+            date
+            tailscale status | head -n 20 || true
+            ps aux | egrep 'vnc|tailscale' || true
             sleep 300
           done
