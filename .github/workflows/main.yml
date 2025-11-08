@@ -1,4 +1,4 @@
-name: macOS: Tailscale + VNC + Roblox installer
+name: macOS Tailscale + VNC + Roblox installer
 
 on:
   workflow_dispatch:
