@@ -55,17 +55,20 @@ jobs:
 
       - name: Setup Virtual Display Driver
         run: |
-          # Download and install virtual display driver
-          echo "Installing virtual display driver..."
+          echo "Configuring system display settings..."
           
-          # Use dummy display kext (safe for GitHub Actions)
-          curl -L -o /tmp/displaylink.zip https://github.com/avibrazil/RDM/releases/download/4.4/RDM-4.4.zip
-          unzip -q /tmp/displaylink.zip -d /tmp/
-          
-          # Create virtual display configuration
+          # Enable display resolution configuration
           sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.Displays.plist DisplayAnyUserSets -bool true
           
-          echo "✓ Display driver installed"
+          # Set default resolution
+          sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionDisabled -bool false
+          
+          # Force enable all displays
+          sudo defaults write /Library/Preferences/com.apple.Displays AppleDisplay -dict-add "DisplayVendorID" -int 0
+          sudo defaults write /Library/Preferences/com.apple.Displays AppleDisplay -dict-add "DisplayProductID" -int 0
+          
+          echo "✓ Display settings configured"
 
       - name: Start GUI Session with Virtual Framebuffer
         run: |
