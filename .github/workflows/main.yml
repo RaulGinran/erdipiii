@@ -25,25 +25,24 @@ jobs:
           echo "Installing Tailscale via Homebrew..."
           brew install tailscale
           
-          # Start tailscaled service
+          # Start tailscaled using brew services (handles socket correctly)
           echo "Starting Tailscale daemon..."
-          sudo $(brew --prefix)/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+          sudo brew services start tailscale
           
           # Wait for daemon to be ready
           sleep 10
           
-          # Verify socket exists
-          if [ ! -S /var/run/tailscale/tailscaled.sock ]; then
-            echo "❌ Tailscale socket not found"
-            ps aux | grep tailscale
+          # Verify daemon is running
+          if ! pgrep -x tailscaled > /dev/null; then
+            echo "❌ Tailscale daemon not running"
             exit 1
           fi
           
-          echo "✓ Daemon socket ready"
+          echo "✓ Daemon running"
           
           # Connect to Tailscale network
           echo "Connecting to Tailscale..."
-          sudo $(brew --prefix)/bin/tailscale up \
+          sudo tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-mac-${{ github.run_id }} \
             --accept-routes
@@ -90,7 +89,7 @@ jobs:
           
           retries=0
           while [ $retries -lt 20 ]; do
-            TSIP=$(sudo $(brew --prefix)/bin/tailscale ip -4 2>/dev/null || true)
+            TSIP=$(sudo tailscale ip -4 2>/dev/null || true)
             if [ ! -z "$TSIP" ]; then
               echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
               echo "✓ Got Tailscale IP: $TSIP"
@@ -104,7 +103,7 @@ jobs:
           if [ -z "$TSIP" ]; then
             echo "❌ Failed to get Tailscale IP"
             echo "Tailscale Status:"
-            sudo $(brew --prefix)/bin/tailscale status
+            sudo tailscale status
             exit 1
           fi
 
