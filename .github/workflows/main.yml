@@ -53,15 +53,13 @@ jobs:
             exit 1
           fi
 
-            - name: Setup GUI, VNC, and Force Login
+      - name: Setup GUI, VNC, and Force Login
         run: |
           echo "Setting password for runner user..."
           
-          # -----------------------------------------------------------------
           # PERBAIKAN: Gunakan 'changepassword' dan asumsikan password lama kosong ("")
           # Ini menghindari prompt interaktif yang menyebabkan error eDSAuthFailed
           sudo dscl . -changepassword /Users/runner "" "$VNC_PASSWORD"
-          # -----------------------------------------------------------------
           
           echo "Configuring VNC password..."
           # Ini script perl dari workflow-mu untuk set password VNC
@@ -84,7 +82,6 @@ jobs:
           echo "✓ VNC setup and GUI login initiated."
           echo "Waiting 15s for GUI session to stabilize..."
           sleep 15
-          
 
       - name: Verify VNC Port
         run: |
