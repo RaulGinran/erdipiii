@@ -3,7 +3,7 @@ name: macOS VNC
 on:
   workflow_dispatch:
 
-jobs:
+jobs
   macos-vnc:
     runs-on: macos-latest
     timeout-minutes: 3600
@@ -37,7 +37,7 @@ jobs:
           sleep 5
           retries=0
           while [ $retries -lt 20 ]; do
-            TSIP=$(sudo tailscale ip -4 2>/dev/null || true)
+            TSIP=$(sudo tailscale ip -4 2/dev/null || true)
             if [ ! -z "$TSIP" ]; then
               echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
               echo "✓ Tailscale IP: $TSIP"
@@ -53,42 +53,37 @@ jobs:
             exit 1
           fi
 
-      - name: Enable VNC Screen Sharing
+      - name: Setup GUI and VNC (Legacy Password)
         run: |
-          echo "Configuring VNC..."
+          echo "Setting legacy VNC password..."
           
           # -----------------------------------------------------------------
-          # KITA KEMBALI PAKAI INI. Ini mengatur password VNC, BUKAN password user
+          # KITA PAKAI INI. Ini mengatur password VNC, BUKAN password user
           printf "%s" "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
           # -----------------------------------------------------------------
           
-          # Aktifkan VNC
+          echo "Skipping user password setup..."
+          # Perintah 'dscl' yang gagal kita hapus
+          
+          echo "Activating ARD/VNC..."
+          # Kita gunakan perintah kickstart yang sama persis dengan yang kamu suka
+          # Meskipun '-login' gagal, bagian '-activate' dan '-restart' akan jalan
+          # dan membangunkan GUI.
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -allowAccessFor -allUsers \
             -configure -access -on \
             -configure -privs -all \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
-            -restart -agent -console
+            -restart -agent -console \
+            -login -name runner -password "$VNC_PASSWORD"
           
+          # Pastikan service-nya berjalan
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          echo "✓ VNC enabled"
-
-      - name: Start GUI Session (Finder & Dock)
-        run: |
-          echo "Starting GUI session for user 'runner'..."
-          
-          # -----------------------------------------------------------------
-          # INI KUNCI BARUNYA: Memaksa Finder dan Dock jalan SETELAH VNC aktif
-          # Ini akan membuatkan user session yang bisa dilihat VNC
-          sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Finder.app
-          sudo launchctl asuser $(id -u runner) /usr/bin/open -a /System/Library/CoreServices/Dock.app
-          # -----------------------------------------------------------------
-          
-          echo "Waiting 10s for GUI to stabilize..."
-          sleep 10
-          echo "✓ GUI session should be active"
+          echo "✓ VNC setup and GUI login initiated."
+          echo "Waiting 15s for GUI session to stabilize..."
+          sleep 15
 
       - name: Verify VNC Port
         run: |
@@ -114,8 +109,7 @@ jobs:
           echo ""
           
           # Keep everything alive
-          while true;
-            do
-              echo "[$(date)] macOS VNC Active"
-              sleep 300
-            done
+          while true; do
+            echo "[$(date)] macOS VNC Active"
+            sleep 300
+          done
