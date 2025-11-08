@@ -1,10 +1,10 @@
-name: macOS Tailscale + VNC + Roblox installer
+name: macOS Tailscale + macOS VNC + Roblox
 
 on:
   workflow_dispatch:
     inputs:
       ROBLOX_URL:
-        description: "Optional: direct URL to Roblox .dmg (will fallback to CDN lookup if empty)"
+        description: "Optional: direct URL to Roblox .dmg (otherwise auto)"
         required: false
         default: ""
 
@@ -21,229 +21,174 @@ jobs:
           uname -a
           echo "Runner: $RUNNER_NAME / $RUNNER_OS / $RUNNER_ARCH"
 
-      - name: Ensure Homebrew present
+      - name: Ensure Homebrew & install Tailscale
         shell: bash
         run: |
+          # Ensure brew in PATH
           if ! command -v brew >/dev/null 2>&1; then
             /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            # Add brew to PATH for macOS runners (non-interactive)
-            eval "$(/opt/homebrew/bin/brew shellenv || true)"
-            eval "$(/usr/local/bin/brew shellenv || true)"
           fi
+          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
+          eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
+
           brew update
+          brew install tailscale || brew upgrade tailscale || true
+          command -v tailscale && tailscale version
 
-      - name: Install Tailscale CLI & TigerVNC
-        shell: bash
-        run: |
-          brew install tailscale tigervnc || (brew upgrade tailscale tigervnc || true)
-          tailscale version || true
-          vncserver -version || true
-
-      - name: Start tailscaled (daemon) and tailscale up
+      - name: Start tailscaled & connect to tailnet
         shell: bash
         env:
           TS_AUTH: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+          set -euo pipefail
           if [ -z "${TS_AUTH:-}" ]; then
             echo "Missing secret: TAILSCALE_AUTH_KEY" >&2
             exit 1
           fi
 
-          # start tailscaled in background (userspace-networking more portable)
+          # Start daemon
           sudo nohup tailscaled --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
 
-          # Wait for daemon
+          # Wait daemon up to 20s
           for i in $(seq 1 20); do
             tailscale status >/dev/null 2>&1 && break || sleep 1
           done
 
           HOST="gha-macos-${GITHUB_RUN_ID}"
-          sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}" --accept-routes || sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}" || true
+          sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}" --accept-routes --accept-dns || \
+          sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}"
 
-          # Get Tailscale IPv4 (100.x)
-          ip4=$(tailscale ip -4 2>/dev/null | grep -E '^\s*100\.' | head -n1 | xargs || true)
+          ip4="$(tailscale ip -4 | awk '/^ *100\./ {print $1; exit}')"
           if [ -z "$ip4" ]; then
-            echo "No Tailscale IPv4 found yet; dumping tailscale status/log"
+            echo "No Tailscale IPv4 yet"
             tailscale status || true
-            tail -n 200 /tmp/tailscaled.log || true
-            # don't fail hard here, but the next steps expect TAILSCALE_IP
-          else
-            echo "TAILSCALE_IP=$ip4" >> "$GITHUB_ENV"
-            echo "Tailscale IP: $ip4"
+            tail -n 100 /tmp/tailscaled.log || true
+            exit 1
           fi
+          echo "TAILSCALE_IP=$ip4" >> "$GITHUB_ENV"
+          echo "Tailscale IP: $ip4"
 
-      - name: Create VNC user (ghvnc) and set password (or generate)
+      - name: Create VNC user & enable macOS VNC (Screen Sharing)
         shell: bash
         env:
-          VNC_PASS_SECRET: ${{ secrets.VNC_PASS }}
+          VNC_PASS: ${{ secrets.VNC_PASS }}
         run: |
           set -euo pipefail
 
-          USER=ghvnc
-          # If secret provided, use it; otherwise generate a random password
-          if [ -n "${VNC_PASS_SECRET:-}" ]; then
-            PASS="${VNC_PASS_SECRET}"
-          else
-            PASS="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || echo "ghVNC$(date +%s)")"
-            echo "::add-mask::$PASS"
+          if [ -z "${VNC_PASS:-}" ]; then
+            echo "Secret VNC_PASS is required (max 8 ASCII chars)." >&2
+            exit 1
           fi
-
-          # Create user if not exists
-          if ! id -u "$USER" >/dev/null 2>&1; then
-            sudo sysadminctl -addUser "$USER" -fullName "GH VNC User" -password "$PASS" -home "/Users/$USER" -admin
-            sudo createhomedir -c -u "$USER" >/dev/null 2>&1 || true
-          else
-            # update password
-            sudo dscl . -passwd /Users/"$USER" "$PASS"
-          fi
-
-          # Ensure proper ownership/home
-          sudo chown -R "$USER":staff "/Users/$USER" || true
-          echo "SSH / VNC user: $USER"
-          echo "VNC_PASS_SET=1" >> "$GITHUB_ENV"
-          # DO NOT echo the password in logs unmasked
-          echo "VNC_USER=$USER" >> "$GITHUB_ENV"
-          # store the pass temporarily in env for the vnc setup step
-          echo "VNC_PASS=$PASS" >> "$GITHUB_ENV"
-
-      - name: Configure TigerVNC password & launch VNC server (:0 -> 5900)
-        shell: bash
-        run: |
-          set -euo pipefail
-          USER=${VNC_USER:-ghvnc}
-          PASS=${VNC_PASS:-}
-          if [ -z "$PASS" ]; then
-            echo "VNC password missing" >&2
+          if [ "${#VNC_PASS}" -gt 8 ]; then
+            echo "VNC_PASS too long (>8). Apple VNC legacy requires max 8 chars." >&2
             exit 1
           fi
 
-          # Prepare .vnc dir in user's home
-          HOME_DIR="/Users/$USER"
-          sudo -u "$USER" mkdir -p "$HOME_DIR/.vnc"
-          # Create password file - use vncpasswd -f if available
-          # vncpasswd -f reads password from stdin and outputs encoded form
-          printf "%s\n" "$PASS" | sudo -u "$USER" /opt/homebrew/bin/vncpasswd -f > "$HOME_DIR/.vnc/passwd" 2>/dev/null || \
-            printf "%s\n" "$PASS" | sudo -u "$USER" vncpasswd -f > "$HOME_DIR/.vnc/passwd"
-          sudo chmod 600 "$HOME_DIR/.vnc/passwd"
-          sudo chown "$USER":staff "$HOME_DIR/.vnc/passwd"
+          USER="ghvnc"
+          # Create or update user (non-admin)
+          if ! id -u "$USER" >/dev/null 2>&1; then
+            sudo sysadminctl -addUser "$USER" -fullName "GH VNC User" -password "$VNC_PASS" -home "/Users/$USER"
+            sudo createhomedir -c -u "$USER" >/dev/null 2>&1 || true
+          else
+            sudo dscl . -passwd "/Users/$USER" "$VNC_PASS"
+          fi
+          sudo chown -R "$USER":staff "/Users/$USER" || true
+          echo "VNC_USER=$USER" >> "$GITHUB_ENV"
 
-          # Kill any existing vncserver instances for that user
-          sudo pkill -u "$USER" Xtightvnc || true
-          sudo pkill -u "$USER" Xvnc || true
-          sudo pkill -u "$USER" vncserver || true
+          KICK="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
 
-          # Launch vncserver as that user, display :0 mapped to 5900 (use :1 -> 5901 by default)
-          # We'll use display :0 so remote VNC client connects to <IP>:5900
-          # But TigerVNC typically uses :1 -> 5901; to bind to 5900 we use -rfbport 5900
-          sudo -u "$USER" /opt/homebrew/bin/vncserver -geometry 1920x1200 -rfbport 5900 :1 >/tmp/vncserver.log 2>&1 &
+          # Activate Remote Management (Screen Sharing) + allow legacy VNC password
+          sudo "$KICK" -activate
+          sudo "$KICK" -configure -access -on
+          sudo "$KICK" -configure -clientopts -setvnclegacy -vnclegacy yes
+          # Set VNC password
+          sudo "$KICK" -configure -setvncpw -vncpw "$VNC_PASS"
+          # Grant privileges to the created user for ARD
+          sudo "$KICK" -configure -users "$USER" -privs -all
+          # Restart ARD agent
+          sudo "$KICK" -restart -agent
 
-          sleep 2
-          tail -n +1 /tmp/vncserver.log || true
+          # Enable SSH (optional, handy for troubleshooting)
+          sudo systemsetup -setremotelogin on
 
-          echo "VNC started (display :1 -> TCP 5900)."
-          # Expose info
-          echo "VNC_PORT=5900" >> "$GITHUB_ENV"
-
-      - name: (Optional) Download & Install Roblox (macOS)
+      - name: Install Roblox (DMG)
         shell: bash
-        if: always()
         env:
           ROBLOX_URL_INPUT: ${{ github.event.inputs.ROBLOX_URL }}
         run: |
           set -euo pipefail
-          TMPDIR="$(mktemp -d)"
-          cd "$TMPDIR"
+          TMP="$(mktemp -d)"
+          cd "$TMP"
 
-          # If user provided direct URL, try that first
+          # Prefer user-supplied URL; else fetch stable DMG from rbxcdn with fallback
           if [ -n "${ROBLOX_URL_INPUT:-}" ]; then
-            URL="${ROBLOX_URL_INPUT}"
+            URL="$ROBLOX_URL_INPUT"
           else
-            # Query Roblox service to get latest Mac client version string then download
-            # This endpoint returns a JSON with version for MacPlayer (community-discovered)
+            # Try versioned endpoint; fallback to generic
             VER_JSON="$(curl -fsS 'https://clientsettings.roblox.com/v2/client-version/MacPlayer' || true)"
-            VER="$(echo "$VER_JSON" | grep -Eo 'version-[0-9A-Za-z-]+' || true)"
-            if [ -z "$VER" ]; then
-              # fallback to a common CDN filename pattern
-              echo "Could not fetch version string; attempting generic CDN path."
-              URL="https://setup.rbxcdn.com/Roblox.dmg"
-            else
-              # Construct likely CDN URL: https://setup.rbxcdn.com/mac/$VER-Roblox.dmg
+            VER="$(echo "$VER_JSON" | grep -Eo 'version-[0-9A-Za-z-]+' | head -n1 || true)"
+            if [ -n "$VER" ]; then
               URL="https://setup.rbxcdn.com/mac/${VER}-Roblox.dmg"
+            else
+              URL="https://setup.rbxcdn.com/Roblox.dmg"
             fi
           fi
 
-          echo "Attempting download: $URL"
-          curl -fL --retry 5 -o Roblox.dmg "$URL" || ( echo "Download failed: $URL" >&2; ls -la; exit 1 )
-
-          if [ -n "${{ secrets.ROBLOX_SHA256 || '' }}" ]; then
-            echo "Verifying checksum..."
-            actual="$(shasum -a 256 Roblox.dmg | awk '{print $1}')"
-            if [ "$actual" != "${{ secrets.ROBLOX_SHA256 }}" ]; then
-              echo "Checksum mismatch (expected secret ROBLOX_SHA256). Aborting." >&2
-              exit 1
-            fi
-          fi
+          echo "Downloading: $URL"
+          curl -fL --retry 5 -o Roblox.dmg "$URL"
 
           # Mount DMG
-          MOUNT_POINT=$(hdiutil attach Roblox.dmg -nobrowse -quiet | awk '/Volumes/ {for(i=1;i<=NF;i++){ if($i ~ /^\\//) {print $i; exit}}}')
-          if [ -z "$MOUNT_POINT" ]; then
-            # try listing
-            hdiutil attach Roblox.dmg -nobrowse -quiet
-            MOUNT_POINT=$(ls /Volumes | grep -i Roblox || true)
-            MOUNT_POINT="/Volumes/$MOUNT_POINT"
+          MOUNT="$(hdiutil attach Roblox.dmg -nobrowse -quiet | awk '/Volumes/ {print $3; exit}')"
+          if [ -z "$MOUNT" ]; then
+            echo "Failed to mount Roblox.dmg" >&2
+            exit 1
           fi
-          echo "Mounted at: $MOUNT_POINT"
 
-          # Try to find the app inside mount
-          APP_PATH="$(find "$MOUNT_POINT" -maxdepth 2 -type d -name 'Roblox.app' -print -quit || true)"
-          if [ -z "$APP_PATH" ]; then
-            # Some installers put package inside
-            PKG="$(find "$MOUNT_POINT" -maxdepth 2 -type f -name '*.pkg' -print -quit || true)"
-            if [ -n "$PKG" ]; then
-              sudo installer -pkg "$PKG" -target /
+          # Install .app or .pkg inside
+          if compgen -G "$MOUNT/*.pkg" > /dev/null; then
+            PKG="$(ls "$MOUNT"/*.pkg | head -n1)"
+            sudo installer -pkg "$PKG" -target /
+          elif [ -d "$MOUNT/Roblox.app" ]; then
+            sudo cp -R "$MOUNT/Roblox.app" /Applications/
+          else
+            # try search
+            APP="$(find "$MOUNT" -maxdepth 2 -name 'Roblox.app' -type d -print -quit || true)"
+            if [ -n "$APP" ]; then
+              sudo cp -R "$APP" /Applications/
             else
-              echo "Roblox.app not found in DMG; listing $MOUNT_POINT:" || true
-              ls -la "$MOUNT_POINT" || true
-              hdiutil detach "$MOUNT_POINT" -quiet || true
+              echo "Roblox.app/.pkg not found in DMG" >&2
+              ls -la "$MOUNT" || true
+              hdiutil detach "$MOUNT" -quiet || true
               exit 1
             fi
-          else
-            echo "Found app: $APP_PATH"
-            sudo cp -R "$APP_PATH" /Applications/
           fi
 
-          # Unmount
-          if [ -n "$MOUNT_POINT" ]; then
-            hdiutil detach "$MOUNT_POINT" -quiet || true
-          fi
+          hdiutil detach "$MOUNT" -quiet || true
 
-          # Basic check
           if [ -d "/Applications/Roblox.app" ]; then
-            echo "Roblox installed to /Applications/Roblox.app"
+            echo "Roblox installed at /Applications/Roblox.app"
           else
-            echo "Roblox install failed or not found in /Applications" >&2
-            ls -la /Applications | head -n 200 || true
+            echo "Roblox install failed" >&2
+            exit 1
           fi
 
-      - name: Print connection info and keep alive
+      - name: Print connection info & keep alive
         shell: bash
         timeout-minutes: 360
         run: |
           echo ""
           echo "=== CONNECTION INFO ==="
-          echo "Tailscale IP : ${TAILSCALE_IP:-(not-found)}"
-          echo "VNC address : ${TAILSCALE_IP:-(ip)}:5900"
-          echo "VNC user    : ${VNC_USER:-ghvnc}"
-          echo "VNC port    : ${VNC_PORT:-5900}"
-          echo "Roblox path : /Applications/Roblox.app"
+          echo "Tailscale IP : ${TAILSCALE_IP}"
+          echo "VNC address  : ${TAILSCALE_IP}:5900"
+          echo "VNC user     : ${VNC_USER}"
+          echo "VNC password : (from secret VNC_PASS)"
+          echo "Roblox path  : /Applications/Roblox.app"
           echo "tailscaled log: /tmp/tailscaled.log"
-          echo "========================"
+          echo "======================="
           echo ""
 
-          # Keep job alive so you can connect
           while true; do
             date
             tailscale status | head -n 20 || true
-            ps aux | egrep 'vnc|tailscale' || true
             sleep 300
           done
