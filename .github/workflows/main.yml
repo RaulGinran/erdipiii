@@ -1,4 +1,4 @@
-name: VNC + Tailscale (macOS, robust)
+name: VNC + Tailscale (macOS, no-hang)
 
 on:
   workflow_dispatch:
@@ -29,10 +29,7 @@ jobs:
           STABLE_INDEX="https://pkgs.tailscale.com/stable/"
           echo "== Resolve latest Tailscale macOS pkg from index =="
           PKG_NAME="$(curl -fsSL "$STABLE_INDEX" | grep -o 'Tailscale-[0-9.]*-macos\.pkg' | sort -Vr | head -n1)"
-          if [[ -z "${PKG_NAME:-}" ]]; then
-            echo "ERROR: gagal menemukan nama pkg Tailscale di index."
-            exit 1
-          fi
+          [[ -z "${PKG_NAME:-}" ]] && { echo "ERROR: gagal menemukan pkg Tailscale"; exit 1; }
           URL="${STABLE_INDEX}${PKG_NAME}"
           echo "Downloading ${URL} ..."
           curl -fsSL -o "${PKG_NAME}" "${URL}"
@@ -42,28 +39,13 @@ jobs:
 
           TS_APP="/Applications/Tailscale.app"
           TS_BIN="${TS_APP}/Contents/MacOS/Tailscale"
-          if [[ ! -x "$TS_BIN" ]]; then
-            echo "ERROR: Tailscale binary tidak ditemukan di ${TS_BIN}"
-            exit 1
-          fi
+          [[ -x "$TS_BIN" ]] || { echo "ERROR: ${TS_BIN} tidak ditemukan"; exit 1; }
+          "$TS_BIN" version || true
           echo "TS_BIN=${TS_BIN}" >> "$GITHUB_ENV"
           echo
 
-      - name: Launch Tailscale app & prepare daemon
-        shell: bash
-        run: |
-          set -euo pipefail
-          TS_BIN="${TS_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
-          TS_APP="/Applications/Tailscale.app"
-
-          echo "== Launch Tailscale app (to register Network Extension) =="
-          open -a "$TS_APP" || true
-          # Beri waktu sedikit supaya helper/daemon kebangun
-          sleep 5
-          # Pastikan versi kebaca
-          "$TS_BIN" version || true
-          echo
-
+      # OPSI A (aman): skip buka app sama sekali, langsung up
+      # Jika kamu tetap ingin "wake" app-nya, pakai OPSI B di bawah dan hapus step ini.
       - name: Bring up Tailscale (unattended, timeout, verbose)
         shell: bash
         run: |
@@ -71,9 +53,7 @@ jobs:
           TS_BIN="${TS_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
           HOST="macos-runner-${GITHUB_RUN_ID}"
 
-          echo "== Tailscale up (unattended) =="
-          # --unattended: jangan minta GUI login; HARUS pakai auth key yang preauthorized/ephemeral.
-          # --timeout: kalau lama, jangan ngegantung.
+          echo "== tailscale up (no GUI, unattended) =="
           sudo "$TS_BIN" up \
             --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" \
             --hostname="${HOST}" \
@@ -82,44 +62,34 @@ jobs:
             --accept-routes=false \
             --ssh \
             --timeout=60s || {
-              echo "tailscale up gagal/timeout."
+              echo "tailscale up gagal/timeout"
               echo "-- status --"; sudo "$TS_BIN" status || true
               echo "-- netcheck --"; sudo "$TS_BIN" netcheck || true
-              echo "Kemungkinan: auth key butuh approval / expired / tidak preauthorized."
               exit 1
             }
 
           echo
-          echo "== Polling for Tailscale IPv4 (up to ~3 minutes) =="
+          echo "== Polling IPv4 (max ~3 minutes) =="
           tries=0
           TS_IP=""
           while [[ $tries -lt 36 ]]; do
             TS_IP="$(sudo "$TS_BIN" ip -4 | head -n1 || true)"
-            if [[ -n "$TS_IP" ]]; then
-              echo "Tailscale IP acquired: ${TS_IP}"
-              break
-            fi
+            [[ -n "$TS_IP" ]] && { echo "Tailscale IP: ${TS_IP}"; break; }
             tries=$((tries+1))
-            echo "No IP yet... (${tries}/36) waiting 5s"
+            echo "No IP yet... (${tries}/36) wait 5s"
             sleep 5
           done
-
-          if [[ -z "$TS_IP" ]]; then
-            echo "ERROR: Tidak dapat IP Tailscale dalam 3 menit."
-            echo "Cek:"
-            echo " - secrets.TAILSCALE_AUTH_KEY valid, belum expired"
-            echo " - Auth key di-set 'Reusable' atau 'Ephemeral' + 'Preauthorized' (NO admin approval)"
-            echo " - Tailnet policy tidak mewajibkan SSO/GUI approval"
-            echo "-- status --"; sudo "$TS_BIN" status || true
-            echo "-- netcheck --"; sudo "$TS_BIN" netcheck || true
-            exit 1
-          fi
-
+          [[ -z "$TS_IP" ]] && { echo "ERROR: gak dapet IP Tailscale dalam 3 menit"; sudo "$TS_BIN" status || true; exit 1; }
           echo "TAILSCALE_IP=${TS_IP}" >> "$GITHUB_ENV"
-          echo
-          echo "== Quick status =="
-          sudo "$TS_BIN" status || true
-          echo
+
+      # OPSI B (kalau tetap mau "open" app tanpa hang):
+      # - name: (Optional) Background-launch Tailscale app
+      #   shell: bash
+      #   run: |
+      #     TS_APP="/Applications/Tailscale.app"
+      #     echo "Background opening Tailscale..."
+      #     (open -gj -a "$TS_APP" >/dev/null 2>&1 & disown) || true
+      #     sleep 2
 
       - name: Verify VNC port (5900) is listening
         shell: bash
