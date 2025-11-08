@@ -1,4 +1,4 @@
-name: macOS Tailscale + macOS VNC + Roblox
+name: macosailscale + macOS VNC + Roblox
 
 on:
   workflow_dispatch:
@@ -24,7 +24,6 @@ jobs:
       - name: Ensure Homebrew & install Tailscale
         shell: bash
         run: |
-          # Ensure brew in PATH
           if ! command -v brew >/dev/null 2>&1; then
             /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           fi
@@ -46,10 +45,8 @@ jobs:
             exit 1
           fi
 
-          # Start daemon
           sudo nohup tailscaled --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
 
-          # Wait daemon up to 20s
           for i in $(seq 1 20); do
             tailscale status >/dev/null 2>&1 && break || sleep 1
           done
@@ -71,21 +68,22 @@ jobs:
       - name: Create VNC user & enable macOS VNC (Screen Sharing)
         shell: bash
         env:
-          VNC_PASS: ${{ secrets.VNC_PASS }}
+          VNC_PASS_SECRET: ${{ secrets.VNC_PASS }}
         run: |
           set -euo pipefail
 
-          if [ -z "${VNC_PASS:-}" ]; then
-            echo "Secret VNC_PASS is required (max 8 ASCII chars)." >&2
-            exit 1
+          # ---- password: pakai secret kalau ada; kalau kosong generate 8 char & CETAK ----
+          if [ -n "${VNC_PASS_SECRET:-}" ]; then
+            VNC_PASS="$VNC_PASS_SECRET"
+          else
+            VNC_PASS="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)"
+            # cetak ke log (insecure, tapi diminta)
+            echo "::notice::Generated VNC password: ${VNC_PASS}"
           fi
-          if [ "${#VNC_PASS}" -gt 8 ]; then
-            echo "VNC_PASS too long (>8). Apple VNC legacy requires max 8 chars." >&2
-            exit 1
-          fi
+          # enforce batas 8 char (Apple VNC legacy)
+          VNC_PASS="${VNC_PASS:0:8}"
 
           USER="ghvnc"
-          # Create or update user (non-admin)
           if ! id -u "$USER" >/dev/null 2>&1; then
             sudo sysadminctl -addUser "$USER" -fullName "GH VNC User" -password "$VNC_PASS" -home "/Users/$USER"
             sudo createhomedir -c -u "$USER" >/dev/null 2>&1 || true
@@ -94,21 +92,18 @@ jobs:
           fi
           sudo chown -R "$USER":staff "/Users/$USER" || true
           echo "VNC_USER=$USER" >> "$GITHUB_ENV"
+          echo "VNC_PASS=$VNC_PASS" >> "$GITHUB_ENV"   # simpan supaya step terakhir bisa print lagi
 
           KICK="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
 
-          # Activate Remote Management (Screen Sharing) + allow legacy VNC password
           sudo "$KICK" -activate
           sudo "$KICK" -configure -access -on
           sudo "$KICK" -configure -clientopts -setvnclegacy -vnclegacy yes
-          # Set VNC password
           sudo "$KICK" -configure -setvncpw -vncpw "$VNC_PASS"
-          # Grant privileges to the created user for ARD
           sudo "$KICK" -configure -users "$USER" -privs -all
-          # Restart ARD agent
           sudo "$KICK" -restart -agent
 
-          # Enable SSH (optional, handy for troubleshooting)
+          # (opsional) SSH buat troubleshooting
           sudo systemsetup -setremotelogin on
 
       - name: Install Roblox (DMG)
@@ -120,11 +115,9 @@ jobs:
           TMP="$(mktemp -d)"
           cd "$TMP"
 
-          # Prefer user-supplied URL; else fetch stable DMG from rbxcdn with fallback
           if [ -n "${ROBLOX_URL_INPUT:-}" ]; then
             URL="$ROBLOX_URL_INPUT"
           else
-            # Try versioned endpoint; fallback to generic
             VER_JSON="$(curl -fsS 'https://clientsettings.roblox.com/v2/client-version/MacPlayer' || true)"
             VER="$(echo "$VER_JSON" | grep -Eo 'version-[0-9A-Za-z-]+' | head -n1 || true)"
             if [ -n "$VER" ]; then
@@ -137,21 +130,18 @@ jobs:
           echo "Downloading: $URL"
           curl -fL --retry 5 -o Roblox.dmg "$URL"
 
-          # Mount DMG
           MOUNT="$(hdiutil attach Roblox.dmg -nobrowse -quiet | awk '/Volumes/ {print $3; exit}')"
           if [ -z "$MOUNT" ]; then
             echo "Failed to mount Roblox.dmg" >&2
             exit 1
           fi
 
-          # Install .app or .pkg inside
           if compgen -G "$MOUNT/*.pkg" > /dev/null; then
             PKG="$(ls "$MOUNT"/*.pkg | head -n1)"
             sudo installer -pkg "$PKG" -target /
           elif [ -d "$MOUNT/Roblox.app" ]; then
             sudo cp -R "$MOUNT/Roblox.app" /Applications/
           else
-            # try search
             APP="$(find "$MOUNT" -maxdepth 2 -name 'Roblox.app' -type d -print -quit || true)"
             if [ -n "$APP" ]; then
               sudo cp -R "$APP" /Applications/
@@ -181,7 +171,7 @@ jobs:
           echo "Tailscale IP : ${TAILSCALE_IP}"
           echo "VNC address  : ${TAILSCALE_IP}:5900"
           echo "VNC user     : ${VNC_USER}"
-          echo "VNC password : (from secret VNC_PASS)"
+          echo "VNC password : ${VNC_PASS}"
           echo "Roblox path  : /Applications/Roblox.app"
           echo "tailscaled log: /tmp/tailscaled.log"
           echo "======================="
