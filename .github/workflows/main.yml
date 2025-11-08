@@ -14,10 +14,14 @@ jobs:
           # Random 16-char (huruf+angka), tanpa /+=
           password=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-16)
           echo "VNC_PASSWORD=$password" >> $GITHUB_ENV
-          echo "✓ VNC Password (user): $password"
-          # Legacy VNC pass = max 8 char
+          echo "✓ User password (16): $password"
+
+          # Legacy VNC pass = max 8 char (VNC protocol lawas)
           echo "VNC_PASSWORD_LEGACY=${password:0:8}" >> $GITHUB_ENV
-          echo "✓ VNC Password (legacy 8-char): ${password:0:8}"
+          echo "✓ Legacy VNC password (8): ${password:0:8}"
+
+          # Username khusus VNC (jangan ubah 'runner')
+          echo "VNC_USER=vncuser" >> $GITHUB_ENV
 
       - name: Install Tailscale
         run: |
@@ -57,38 +61,53 @@ jobs:
             exit 1
           fi
 
-      - name: Setup GUI, Screen Sharing, and Passwords
+      - name: Create Dedicated Admin User for VNC
         run: |
-          echo "Setting password for 'runner' user (dscl -passwd)..."
-          # Benar: -passwd /Users/runner "newpass" (running as root)
-          sudo dscl . -passwd /Users/runner "$VNC_PASSWORD"
+          set -e
+          echo "Creating user '$VNC_USER'..."
+          # Buat user admin baru (punya home dir), password = $VNC_PASSWORD
+          # sysadminctl sudah include pembuatan homedir; tambahkan -admin agar punya hak admin
+          sudo sysadminctl -addUser "$VNC_USER" -password "$VNC_PASSWORD" -admin
 
-          echo "Enabling Screen Sharing / Remote Management..."
-          # Aktifkan Remote Management & izinkan semua user full access
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on \
-            -configure -allowAccessFor -allUsers \
-            -configure -privs -all \
-            -restart -agent -console
+          # Pastikan home dibuat (fallback untuk versi tertentu)
+          sudo createhomedir -c -u "$VNC_USER" >/dev/null 2>&1 || true
 
-          echo "Enable screensharing service (launchctl) ..."
+          # Tambahkan ke group 'screensharing' kalau ada (biasanya tidak wajib jika pakai ARD)
+          if dscl . -read /Groups/screensharing >/dev/null 2>&1; then
+            sudo dseditgroup -o edit -a "$VNC_USER" -t user screensharing || true
+          fi
+
+          echo "✓ User '$VNC_USER' created and ready."
+
+      - name: Enable Remote Management & Configure Access
+        run: |
+          echo "Enabling Remote Management (Apple Screen Sharing)..."
+          KS="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
+          # Aktifkan layanan
+          sudo "$KS" -activate
+
+          # Izinkan hanya user tertentu (vncuser) & beri semua privileges
+          sudo "$KS" -configure -allowAccessFor -specifiedUsers
+          sudo "$KS" -configure -access -on -privs -all -users "$VNC_USER"
+
+          # Aktifkan screensharing daemon
           sudo launchctl enable system/com.apple.screensharing || true
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
 
-          echo "Configuring LEGACY VNC password (max 8 chars)..."
+          # Set LEGACY VNC password (8 char) supaya kompatibel dengan viewer VNC umum
           LEGACY="${VNC_PASSWORD_LEGACY}"
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          echo "Configuring legacy VNC password (8 chars)..."
+          sudo "$KS" \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
             -configure -clientopts -setvncpw -vncpw "$LEGACY"
 
-          # Restart agent lagi untuk pastikan setting ter-apply
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -restart -agent -console
+          # Restart agent supaya setting ter-apply
+          sudo "$KS" -restart -agent -console
 
-          echo "✓ VNC (legacy) enabled with 8-char password."
+          echo "✓ Remote Management & VNC configured."
 
-          echo "Waiting 15s for GUI/loginwindow to settle..."
+          echo "Waiting 15s for services to settle..."
           sleep 15
 
       - name: Verify VNC Port
@@ -96,7 +115,7 @@ jobs:
           echo "Checking VNC accessibility..."
           (netstat -an 2>/dev/null | grep -E '(^|\.)5900[^0-9]' ) || echo "Warning: Port 5900 not listening yet"
           ps aux | grep -i -E 'screensharing|ARDAgent|RemoteManagement' | grep -v grep || true
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -status || true
+          /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -status || true
 
       - name: Display Connection Info & Keep Alive
         run: |
@@ -106,21 +125,20 @@ jobs:
           echo "================================"
           echo "Address (Tailscale): $TAILSCALE_IP:5900"
           echo ""
-          echo "Use one of these modes:"
-          echo "1) Legacy VNC (umum, 1 kolom password):"
+          echo "Mode A) Legacy VNC (umum, 1 kolom password):"
           echo "   Password: $VNC_PASSWORD_LEGACY    (8 char)"
           echo ""
-          echo "2) Apple Screen Sharing (Mac-to-Mac, user+password):"
-          echo "   Username: runner"
+          echo "Mode B) Apple Screen Sharing (username+password):"
+          echo "   Username: $VNC_USER"
           echo "   Password: $VNC_PASSWORD           (16 char)"
-          echo "   URL: vnc://$TAILSCALE_IP"
+          echo "   URL (dari Mac lain): vnc://$TAILSCALE_IP"
           echo "================================"
           echo ""
           echo "TROUBLESHOOTING:"
-          echo "- Kalau layar hitam: tunggu 30-60 detik, atau disconnect/reconnect."
-          echo "- Banyak VNC viewer non-Apple HANYA dukung legacy password (1 kolom)."
-          echo "- Pastikan connect ke $TAILSCALE_IP:5900 via Tailscale."
-          echo "- Kalau masih susah: coba Apple Screen Sharing dari Mac lain (cmd+K > vnc://IP)."
+          echo "- Kalau viewer hanya minta 1 field password, pakai Mode A (legacy 8-char)."
+          echo "- Kalau viewer support macOS login: pakai Mode B (username+password)."
+          echo "- Kalau layar hitam: tunggu 30-60 detik atau reconnect."
+          echo "- Pastikan konek via Tailscale ke $TAILSCALE_IP:5900."
           echo ""
 
           # Keep GUI/session alive
@@ -130,7 +148,7 @@ jobs:
             # Restart Finder jika crash (optional)
             if ! pgrep -x Finder >/dev/null 2>&1; then
               echo "Restarting Finder..."
-              sudo launchctl asuser "$(id -u runner)" /usr/bin/open -a /System/Library/CoreServices/Finder.app >/dev/null 2>&1 || true
+              sudo launchctl asuser "$(id -u "$VNC_USER")" /usr/bin/open -a /System/Library/CoreServices/Finder.app >/dev/null 2>&1 || true
             fi
             sleep 300
           done
