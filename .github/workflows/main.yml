@@ -96,23 +96,26 @@ jobs:
       # -------------------------------
       # 3) Force GUI session for 'runner' (hindari black screen)
       # -------------------------------
-      - name: Force GUI Session (runner)
+- name: Force GUI Session for runner (avoid black screen)
         run: |
           set -e
           USERNAME="runner"
-          UID=$(id -u "$USERNAME")
-          echo "Bootstrapping GUI for $USERNAME (uid=$UID)..."
+          RUN_UID=$(id -u "$USERNAME")   # <-- pakai RUN_UID, bukan UID
+          echo "Bootstrapping GUI for $USERNAME (uid=$RUN_UID)..."
 
           # Bootstrap GUI domain (Aqua) untuk user headless
-          sudo launchctl bootstrap "gui/$UID" /System/Library/LaunchAgents 2>/dev/null || true
+          sudo launchctl bootstrap "gui/$RUN_UID" /System/Library/LaunchAgents 2>/dev/null || true
 
           # Start komponen desktop inti
-          sudo launchctl asuser "$UID" /usr/bin/open -a /System/Library/CoreServices/Finder.app || true
-          sudo launchctl asuser "$UID" /usr/bin/open -a /System/Library/CoreServices/Dock.app || true
-          sudo launchctl asuser "$UID" /usr/bin/open -a /System/Library/CoreServices/SystemUIServer.app || true
+          sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Library/CoreServices/Finder.app || true
+          sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Library/CoreServices/Dock.app || true
+          sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Library/CoreServices/SystemUIServer.app || true
 
           # Nudge desktop (opsional)
-          sudo launchctl asuser "$UID" /usr/bin/osascript -e 'tell application "Finder" to activate' 2>/dev/null || true
+          sudo launchctl asuser "$RUN_UID" /usr/bin/osascript -e 'tell application "Finder" to activate' 2>/dev/null || true
+          
+          # (opsional) Biar langsung kelihatan, buka TextEdit
+          sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Applications/TextEdit.app || true
 
           echo "Waiting 12s for GUI to settle..."
           sleep 12
