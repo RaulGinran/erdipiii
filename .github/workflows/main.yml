@@ -49,9 +49,17 @@ jobs:
         shell: bash
         run: |
           echo "Creating admin user: $NEW_ADMIN"
-          sudo sysadminctl -addUser "$NEW_ADMIN" -password "$NEW_ADMIN_PW" -admin -home "/Users/$NEW_ADMIN" -UID 599 || true
-          dscl . -read "/Users/$NEW_ADMIN" >/dev/null
-          echo "Admin user ready"
+          # Biarkan macOS pilih UID sendiri (hindari bentrok)
+          sudo sysadminctl -addUser "$NEW_ADMIN" -password "$NEW_ADMIN_PW" -admin -home "/Users/$NEW_ADMIN" || true
+          # Verifikasi user ada
+          if dscl . -read "/Users/$NEW_ADMIN" >/dev/null 2>&1; then
+            echo "Admin user present"
+          else
+            echo "❌ Admin user not present"; exit 1
+          fi
+          NEW_ADMIN_UID="$(id -u "$NEW_ADMIN" 2>/dev/null || true)"
+          echo "NEW_ADMIN_UID=${NEW_ADMIN_UID}" >> "$GITHUB_ENV"
+          echo "Admin UID: ${NEW_ADMIN_UID:-unknown}"
 
       - name: Enable Remote Management + Legacy VNC
         shell: bash
@@ -80,23 +88,34 @@ jobs:
       - name: Connection info & keep alive
         shell: bash
         run: |
+          # Matikan 'exit on error' supaya loop tidak mati kalau ada perintah non-kritis gagal
+          set +e
+
           printf "\n==============================\n"
           printf "   macOS VNC CONNECTION INFO\n"
           printf "==============================\n"
-          printf "Address (Tailscale): %s:5900\n" "$TAILSCALE_IP"
-          printf "VNC Password       : %s\n" "$VNC_PASSWORD"
+          printf "Address (Tailscale): %s:5900\n" "${TAILSCALE_IP:-unknown}"
+          printf "VNC Password       : %s\n" "${VNC_PASSWORD:-unknown}"
           printf "------------------------------\n"
-          printf "macOS GUI user     : %s\n" "$NEW_ADMIN"
-          printf "macOS GUI password : %s\n" "$NEW_ADMIN_PW"
+          printf "macOS GUI user     : %s\n" "${NEW_ADMIN:-ghvnc}"
+          printf "macOS GUI password : %s\n" "${NEW_ADMIN_PW:-<hidden>}"
           printf "==============================\n\n"
 
           echo "How to connect:"
           echo "1) In your VNC client, connect to \$TAILSCALE_IP:5900 and use the VNC password above."
           echo "2) At the macOS login window, sign in with the GUI user and password above."
 
+          # Opsional: start Finder untuk user GUI jika ada UID
+          if [ -n "${NEW_ADMIN_UID:-}" ]; then
+            sudo launchctl asuser "${NEW_ADMIN_UID}" /usr/bin/open -a /System/Library/CoreServices/Finder.app >/dev/null 2>&1 || true
+          fi
+
+          # Loop keep-alive
           while true; do
             echo "[$(date)] macOS VNC Active"
-            caffeinate -u -t 2 >/dev/null 2>&1 &
-            pgrep -x Finder >/dev/null || sudo launchctl asuser "$(id -u "$NEW_ADMIN")" /usr/bin/open -a /System/Library/CoreServices/Finder.app
+            caffeinate -u -t 2 >/dev/null 2>&1 || true
+            if [ -n "${NEW_ADMIN_UID:-}" ]; then
+              pgrep -x Finder >/dev/null 2>&1 || sudo launchctl asuser "${NEW_ADMIN_UID}" /usr/bin/open -a /System/Library/CoreServices/Finder.app >/dev/null 2>&1 || true
+            fi
             sleep 300
           done
