@@ -5,7 +5,7 @@ on:
 
 jobs:
   macos-vnc:
-    runs-on: macos-latest   # macOS 15 Arm64 by default
+    runs-on: macos-latest
     timeout-minutes: 3600
 
     steps:
@@ -14,13 +14,13 @@ jobs:
       # -------------------------------
       - name: Generate VNC Passwords
         run: |
-          # 16-char random (hanya untuk log/info); LEGACY max 8 char (yang dipakai viewer VNC)
+          # 16-char random; LEGACY VNC hanya pakai 8 char pertama
           p=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-16)
           echo "VNC_PASSWORD_FULL=$p" >> $GITHUB_ENV
           echo "VNC_PASSWORD_LEGACY=${p:0:8}" >> $GITHUB_ENV
 
           echo "✓ Legacy VNC password (use in viewer): ${p:0:8}"
-          echo "ℹ️  Note: user 'runner' password TIDAK diubah."
+          echo "ℹ️  Password user 'runner' TIDAK diubah."
 
       # -------------------------------
       # 1) Tailscale
@@ -96,11 +96,11 @@ jobs:
       # -------------------------------
       # 3) Force GUI session for 'runner' (hindari black screen)
       # -------------------------------
-- name: Force GUI Session for runner (avoid black screen)
+      - name: Force GUI Session (runner)
         run: |
           set -e
           USERNAME="runner"
-          RUN_UID=$(id -u "$USERNAME")   # <-- pakai RUN_UID, bukan UID
+          RUN_UID=$(id -u "$USERNAME")
           echo "Bootstrapping GUI for $USERNAME (uid=$RUN_UID)..."
 
           # Bootstrap GUI domain (Aqua) untuk user headless
@@ -111,10 +111,8 @@ jobs:
           sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Library/CoreServices/Dock.app || true
           sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Library/CoreServices/SystemUIServer.app || true
 
-          # Nudge desktop (opsional)
+          # Nudge desktop (opsional) + buka TextEdit biar kelihatan
           sudo launchctl asuser "$RUN_UID" /usr/bin/osascript -e 'tell application "Finder" to activate' 2>/dev/null || true
-          
-          # (opsional) Biar langsung kelihatan, buka TextEdit
           sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Applications/TextEdit.app || true
 
           echo "Waiting 12s for GUI to settle..."
@@ -129,13 +127,12 @@ jobs:
           (netstat -an 2>/dev/null | grep -E '(^|\.)5900[^0-9]') || echo "Warning: Port 5900 not listening yet"
 
           echo "--- Processes ---"
-          ps aux | grep -i -E 'screensharing|ARDAgent|RemoteManagement|WindowServer' | grep -v grep || true
+          ps aux | grep -i -E 'screensharing|ARDAgent|RemoteManagement|WindowServer|TextEdit' | grep -v grep || true
 
           echo "--- ARD Status ---"
           /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -status || true
 
           echo "--- (If needed) restart screensharing agent ---"
-          # Beberapa versi macOS perlu 'kickstart' ulang screensharing
           sudo launchctl kickstart -kp system/com.apple.screensharing 2>/dev/null || true
 
       # -------------------------------
@@ -156,18 +153,21 @@ jobs:
           echo "- Password user 'runner' TIDAK diubah."
           echo "- Mayoritas VNC viewer umum hanya tanya 1 field password => gunakan legacy di atas."
           echo "- Jika pakai Apple Screen Sharing dari Mac lain (vnc://$TAILSCALE_IP),"
-          echo "  bisa coba login sebagai 'runner' + password yang memang sudah ada (jika kamu tahu)."
+          echo "  bisa coba login sebagai 'runner' + password yang memang sudah ada (kalau kamu tahu)."
           echo "=============================================="
           echo ""
 
           # Keep GUI/session alive selama job berjalan
+          USERNAME="runner"
+          RUN_UID=$(id -u "$USERNAME")
+
           while true; do
             echo "[$(date)] macOS VNC Active"
             caffeinate -u -t 2 >/dev/null 2>&1 &
 
-            UID=$(id -u runner)
-            pgrep -x Finder >/dev/null || sudo launchctl asuser "$UID" /usr/bin/open -a /System/Library/CoreServices/Finder.app >/dev/null 2>&1 || true
-            pgrep -x Dock >/dev/null || sudo launchctl asuser "$UID" /usr/bin/open -a /System/Library/CoreServices/Dock.app >/dev/null 2>&1 || true
+            # Jaga komponen desktop untuk user runner
+            pgrep -x Finder >/dev/null || sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Library/CoreServices/Finder.app >/dev/null 2>&1 || true
+            pgrep -x Dock   >/dev/null || sudo launchctl asuser "$RUN_UID" /usr/bin/open -a /System/Library/CoreServices/Dock.app   >/dev/null 2>&1 || true
 
             sleep 300
           done
