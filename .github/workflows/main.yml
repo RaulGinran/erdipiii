@@ -1,4 +1,4 @@
-name: RDP + Tailscale (Ubuntu, FIX XFCE/xRDP)
+name: RDP + Tailscale (Ubuntu MATE, FIX)
 
 on:
   workflow_dispatch:
@@ -14,48 +14,51 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl wget gnupg lsof net-tools ca-certificates
+          sudo apt-get install -y curl wget gnupg lsof net-tools ca-certificates software-properties-common
 
       - name: Create user 'runneradmin' (samain user/pw)
         shell: bash
         run: |
           set -euxo pipefail
           USERNAME="runneradmin"
-          PASSWORD="Asukoe123456"   # <<< samain; lebih aman pakai secrets
+          PASSWORD="Asukoe123456"   # Disarankan pakai secret nantinya
           if ! id -u "$USERNAME" >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash "$USERNAME"
           fi
           echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
           sudo usermod -aG sudo "$USERNAME"
-
           echo "RDP_USER=$USERNAME" >> "$GITHUB_ENV"
           echo "RDP_PASS=$PASSWORD" >> "$GITHUB_ENV"
 
-      - name: Install XFCE desktop + xRDP (plus deps wajib)
+      - name: Install MATE Desktop + xRDP (lebih stabil)
         shell: bash
         run: |
           set -euxo pipefail
+          # Paket inti MATE yang ringan + dependensi xRDP
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-goodies xorg dbus-x11 x11-xserver-utils \
-            xrdp xorgxrdp xfconf policykit-1
+            mate-desktop-environment-core mate-terminal marco pluma engrampa eom \
+            xrdp xorgxrdp dbus-x11 policykit-1
 
-          # xrdp butuh group ssl-cert utk baca cert
+          # Tambahan tema & icon supaya UI nggak berantakan (opsional)
+          sudo apt-get install -y lightdm light-themes adwaita-icon-theme-full || true
+
+          # xrdp perlu group ssl-cert
           sudo adduser xrdp ssl-cert || true
 
-      - name: Configure xRDP to launch XFCE (fix failsafe session)
+      - name: Force xRDP to launch MATE session
         shell: bash
         run: |
           set -euxo pipefail
           USERNAME="${RDP_USER:-runneradmin}"
           HOME_DIR="/home/${USERNAME}"
 
-          # 1) Pastikan session user menunjuk XFCE
-          sudo -u "$USERNAME" bash -lc 'echo "startxfce4" > ~/.xsession'
-          sudo -u "$USERNAME" bash -lc 'echo "xfce4-session" > ~/.xsessionrc'
-          sudo chown "$USERNAME:$USERNAME" "$HOME_DIR/.xsession" "$HOME_DIR/.xsessionrc"
+          # 1) Set sesi user ke MATE
+          sudo -u "$USERNAME" bash -lc 'echo "mate-session" > ~/.xsession'
+          sudo -u "$USERNAME" bash -lc 'printf "[Desktop Entry]\nType=Application\nName=MATE\nExec=mate-session\n" > ~/.xsessionrc || true'
+          sudo chown "$USERNAME:$USERNAME" "$HOME_DIR/.xsession" || true
+          [ -f "$HOME_DIR/.xsessionrc" ] && sudo chown "$USERNAME:$USERNAME" "$HOME_DIR/.xsessionrc" || true
 
-          # 2) Patch startwm.sh agar xrdp pasti jalankan XFCE
-          #    (comment baris default & force startxfce4)
+          # 2) Patch /etc/xrdp/startwm.sh supaya SELALU start mate-session
           sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
           sudo bash -c 'cat >/etc/xrdp/startwm.sh' <<'EOF'
           #!/bin/sh
@@ -67,34 +70,38 @@ jobs:
               export LANG LANGUAGE
           fi
 
-          # Force XFCE for xRDP sessions (robust against failsafe)
+          # Pastikan env yang umum
           export XDG_CONFIG_DIRS="/etc/xdg:/etc"
           export XDG_DATA_DIRS="/usr/share:/usr/local/share"
-          export DESKTOP_SESSION=xfce
-          export XDG_CURRENT_DESKTOP=XFCE
-          command -v dbus-launch >/dev/null 2>&1 && eval "$(dbus-launch --sh-syntax)" || true
+          export DESKTOP_SESSION=mate
+          export XDG_CURRENT_DESKTOP=MATE
 
-          # Start XFCE
-          if command -v startxfce4 >/dev/null 2>&1; then
-              exec startxfce4
+          # Start dbus jika ada
+          if command -v dbus-launch >/dev/null 2>&1; then
+            eval "$(dbus-launch --sh-syntax)" || true
           fi
 
-          # Fallback (shouldn't happen)
+          # Selalu jalankan MATE
+          if command -v mate-session >/dev/null 2>&1; then
+            exec mate-session
+          fi
+
+          # Fallback terakhir
           if test -r /etc/X11/Xsession; then
               exec /etc/X11/Xsession
           fi
           EOF
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # 3) Pastikan layanan aktif
+          # 3) Restart layanan
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
-      - name: (Optional) Limit RDP to Tailscale only
+      - name: (Optional) Batasi RDP ke jaringan Tailscale saja
         shell: bash
         run: |
           set -euxo pipefail
-          # UFW biasanya nonaktif di runner. Jika mau lebih aman:
+          # UFW default non-aktif; kalau mau aman:
           # sudo apt-get install -y ufw
           # sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
           # sudo ufw --force enable
@@ -121,13 +128,11 @@ jobs:
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
           echo "Tailscale IP: $TS_IP"
 
-      - name: Verify RDP port via Tailscale
+      - name: Verify xRDP is listening
         shell: bash
         run: |
           set -euxo pipefail
-          TS_IP="$TAILSCALE_IP"
-          echo "Testing TCP 3389 on $TS_IP ..."
-          timeout 5 bash -lc "exec 3<>/dev/tcp/${TS_IP}/3389" && echo "RDP 3389 reachable." || (echo "RDP 3389 not reachable" && exit 1)
+          sudo ss -tulpn | awk '$1 ~ /LISTEN/ && $5 ~ /:3389/ {print $0}' || true
 
       - name: Show connection info & keep alive
         shell: bash
@@ -135,18 +140,13 @@ jobs:
         run: |
           set -euxo pipefail
           echo
-          echo "=== RDP ACCESS (Ubuntu) ==="
+          echo "=== RDP ACCESS (Ubuntu MATE) ==="
           echo "Address : ${TAILSCALE_IP}"
           echo "Username: ${RDP_USER}"
           echo "Password: ${RDP_PASS}"
-          echo "==========================="
+          echo "================================"
           echo
-
-          echo "Listening sockets (grep 3389):"
-          sudo ss -tulpn | (grep 3389 || true) || true
-          echo
-
-          # Keep runner hidup (cancel workflow untuk stop)
+          # Keep runner hidup
           while true; do
             echo "[$(date)] RDP Active - cancel workflow to terminate"
             sleep 300
