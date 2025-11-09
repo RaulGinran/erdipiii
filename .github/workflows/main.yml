@@ -32,7 +32,7 @@ jobs:
           
           echo "Instalasi software selesai."
 
-      - name: Configure XRDP and Set Password
+        - name: Configure XRDP and Set Password
         shell: bash
         run: |
           # Konfigurasi XRDP untuk menggunakan XFCE
@@ -44,8 +44,9 @@ jobs:
           sudo systemctl restart xrdp
           
           # Set password untuk user 'runner' (user default di GitHub Actions)
-          $user = "runner"
-          $pass = "Asukoe123456" # <- Password basic
+          # PERBAIKAN: Menghapus spasi dan tanda $ saat mengatur variabel
+          user="runner"
+          pass="Asukoe123456" # <- Password basic
           
           echo "Mengatur password untuk user $user..."
           echo "$user:$pass" | sudo chpasswd
