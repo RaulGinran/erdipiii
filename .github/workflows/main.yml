@@ -1,4 +1,4 @@
-name: RDP + Tailscale (Ubuntu)
+name: RDP + Tailscale (Ubuntu, FIX XFCE/xRDP)
 
 on:
   workflow_dispatch:
@@ -6,58 +6,95 @@ on:
 jobs:
   setup-remote:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # tahan sampai ~6 jam
+    timeout-minutes: 360
 
     steps:
-      - name: Update apt & basic tools
+      - name: Update apt & tools
         shell: bash
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl wget gnupg lsof net-tools
+          sudo apt-get install -y curl wget gnupg lsof net-tools ca-certificates
 
-      - name: Create user 'runneradmin' (samain user/pw) & prep home
+      - name: Create user 'runneradmin' (samain user/pw)
         shell: bash
         run: |
           set -euxo pipefail
           USERNAME="runneradmin"
-          PASSWORD="Asukoe123456"   # <- samain; disarankan pakai secret nantinya
+          PASSWORD="Asukoe123456"   # <<< samain; lebih aman pakai secrets
           if ! id -u "$USERNAME" >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash "$USERNAME"
           fi
           echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
           sudo usermod -aG sudo "$USERNAME"
 
-          # simpan env untuk ditampilkan nanti
           echo "RDP_USER=$USERNAME" >> "$GITHUB_ENV"
           echo "RDP_PASS=$PASSWORD" >> "$GITHUB_ENV"
 
-      - name: Install desktop (XFCE) + xrdp
+      - name: Install XFCE desktop + xRDP (plus deps wajib)
         shell: bash
         run: |
           set -euxo pipefail
-          # XFCE jauh lebih ringan dibanding ubuntu-desktop
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xorg dbus-x11 x11-xserver-utils
-          sudo apt-get install -y xrdp
-          # xrdp butuh akses ke cert
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies xorg dbus-x11 x11-xserver-utils \
+            xrdp xorgxrdp xfconf policykit-1
+
+          # xrdp butuh group ssl-cert utk baca cert
           sudo adduser xrdp ssl-cert || true
-          # Pakai XFCE untuk sesi RDP
-          for u in "$RDP_USER" "runner"; do
-            if id "$u" >/dev/null 2>&1; then
-              sudo -u "$u" bash -lc 'echo "startxfce4" > ~/.xsession'
-            fi
-          done
-          # Enable & start xrdp
+
+      - name: Configure xRDP to launch XFCE (fix failsafe session)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          USERNAME="${RDP_USER:-runneradmin}"
+          HOME_DIR="/home/${USERNAME}"
+
+          # 1) Pastikan session user menunjuk XFCE
+          sudo -u "$USERNAME" bash -lc 'echo "startxfce4" > ~/.xsession'
+          sudo -u "$USERNAME" bash -lc 'echo "xfce4-session" > ~/.xsessionrc'
+          sudo chown "$USERNAME:$USERNAME" "$HOME_DIR/.xsession" "$HOME_DIR/.xsessionrc"
+
+          # 2) Patch startwm.sh agar xrdp pasti jalankan XFCE
+          #    (comment baris default & force startxfce4)
+          sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
+          sudo bash -c 'cat >/etc/xrdp/startwm.sh' <<'EOF'
+          #!/bin/sh
+          if test -r /etc/profile; then
+              . /etc/profile
+          fi
+          if test -r /etc/default/locale; then
+              . /etc/default/locale
+              export LANG LANGUAGE
+          fi
+
+          # Force XFCE for xRDP sessions (robust against failsafe)
+          export XDG_CONFIG_DIRS="/etc/xdg:/etc"
+          export XDG_DATA_DIRS="/usr/share:/usr/local/share"
+          export DESKTOP_SESSION=xfce
+          export XDG_CURRENT_DESKTOP=XFCE
+          command -v dbus-launch >/dev/null 2>&1 && eval "$(dbus-launch --sh-syntax)" || true
+
+          # Start XFCE
+          if command -v startxfce4 >/dev/null 2>&1; then
+              exec startxfce4
+          fi
+
+          # Fallback (shouldn't happen)
+          if test -r /etc/X11/Xsession; then
+              exec /etc/X11/Xsession
+          fi
+          EOF
+          sudo chmod +x /etc/xrdp/startwm.sh
+
+          # 3) Pastikan layanan aktif
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
-      - name: (Optional) Restrict RDP to Tailscale only (no UFW by default)
+      - name: (Optional) Limit RDP to Tailscale only
         shell: bash
         run: |
           set -euxo pipefail
-          # GitHub ubuntu runners biasanya tidak mengaktifkan UFW, jadi port 3389 terbuka.
-          # Kalau mau lebih aman, aktifkan UFW & izinkan hanya dari subnet Tailscale (100.64.0.0/10).
+          # UFW biasanya nonaktif di runner. Jika mau lebih aman:
           # sudo apt-get install -y ufw
           # sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
           # sudo ufw --force enable
@@ -77,7 +114,6 @@ jobs:
         run: |
           set -euxo pipefail
           sudo tailscale up --authkey="${TS_AUTHKEY}" --hostname="gh-ubuntu-${GITHUB_RUN_ID}"
-          # Ambil IPv4 Tailscale
           TS_IP="$(tailscale ip -4 | head -n1 || true)"
           if [ -z "$TS_IP" ]; then
             echo "Gagal mengambil IPv4 Tailscale"; exit 1
@@ -91,7 +127,6 @@ jobs:
           set -euxo pipefail
           TS_IP="$TAILSCALE_IP"
           echo "Testing TCP 3389 on $TS_IP ..."
-          # Coba connect ke port 3389 (xrdp) via bash /dev/tcp
           timeout 5 bash -lc "exec 3<>/dev/tcp/${TS_IP}/3389" && echo "RDP 3389 reachable." || (echo "RDP 3389 not reachable" && exit 1)
 
       - name: Show connection info & keep alive
@@ -111,7 +146,7 @@ jobs:
           sudo ss -tulpn | (grep 3389 || true) || true
           echo
 
-          # Keep runner hidup (CTRL+C / cancel job untuk stop)
+          # Keep runner hidup (cancel workflow untuk stop)
           while true; do
             echo "[$(date)] RDP Active - cancel workflow to terminate"
             sleep 300
