@@ -1,63 +1,32 @@
-name: Modern VNC + Tailscale + XFCE
+name: macOS + Tailscale SSH
 
 on:
   workflow_dispatch:
 
 jobs:
   setup-remote:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+    # 1. Menggunakan runner macos-latest
+    runs-on: macos-latest
+    timeout-minutes: 360 # Tahan sampai 6 jam
 
     steps:
-      - name: Install Desktop, VNC (Modern), and Chrome
-        shell: bash
-        run: |
-          echo "Memulai update dan instalasi..."
-          sudo apt-get update
-          
-          echo "Menginstall Desktop (XFCE), VNC (x11vnc + Xvfb)..."
-          # KITA GANTI TOTAL:
-          # - Menghapus xrdp, tigervnc
-          # - Menambah x11vnc (server), xvfb (layar virtual)
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
-            x11vnc \
-            xvfb
-          
-          # Install Google Chrome
-          echo "Menginstall Google Chrome..."
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          
-          echo "Instalasi software selesai."
-
-      - name: Set Password for VNC
-        shell: bash
-        run: |
-          user="runner"
-          pass="Asukoe123456" # <- Password basic
-          
-          echo "Membuat direktori VNC..."
-          mkdir -p ~/.vnc
-          
-          echo "Mengatur password VNC..."
-          # Kita pakai x11vnc, jadi kita simpan password-nya di file
-          x11vnc -storepasswd "$pass" ~/.vnc/passwd
-          
-          echo "RDP_PASS=$pass" >> $GITHUB_ENV # Kita tetap pakai nama var ini biar gampang
-          echo "Konfigurasi password selesai."
-
       - name: Install and Connect Tailscale
         shell: bash
         run: |
           echo "Menginstall Tailscale..."
-          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          # 2. Cara install Tailscale di macOS adalah pakai 'brew'
+          brew install tailscale
           
-          echo "Menghubungkan ke Tailscale..."
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$GITHUB_RUN_ID" --accept-routes
+          echo "Menjalankan Tailscale service..."
+          # 3. Service-nya harus dijalankan di background
+          sudo tailscaled &
+          
+          # Jeda singkat untuk memastikan service siap
+          sleep 5 
+          
+          echo "Menghubungkan ke Tailscale dan mengaktifkan SSH..."
+          # 4. Flag --ssh sangat penting
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-macos-$GITHUB_RUN_ID" --accept-routes --ssh
           
           # Ambil IPv4 dengan retry
           echo "Mendapatkan IP Tailscale..."
@@ -78,35 +47,31 @@ jobs:
           fi
           
           echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
+          
+          # 5. User default di runner macOS adalah 'runner'
+          echo "SSH_USER=runner" >> $GITHUB_ENV
           echo "Tailscale IP: $tsIP"
 
-      - name: Start VNC Server & Keep Alive
+      - name: Show connection info & keep alive
         shell: bash
         timeout-minutes: 360 # Sesuaikan dengan timeout job
         run: |
-          echo "Mempersiapkan layar virtual (Xvfb)..."
-          # Jalankan Xvfb di display :0, di background
-          Xvfb :0 -screen 0 1280x800x24 -nocursor &
-          
-          # Atur agar semua program tahu layarnya ada di :0
-          export DISPLAY=:0
-          
-          echo "Menjalankan XFCE Desktop di layar virtual..."
-          # Jalankan XFCE di background
-          startxfce4 &
-          
-          # Tunggu desktop siap
-          sleep 5
-          
           echo ""
           echo "==================="
-          echo "=== VNC ACCESS (Modern) ==="
-          echo "Address  : $TAILSCALE_IP:5900"
-          echo "Password : $RDP_PASS"
+          echo "=== SSH ACCESS (TERMINAL) ==="
+          echo "Ini HANYA Terminal. JANGAN pakai VNC Viewer."
+          echo "Gunakan aplikasi SSH Client (misal: Termius, JuiceSSH)."
+          echo ""
+          echo "Address  : $TAILSCALE_IP"
+          echo "User     : $SSH_USER"
+          echo "Password : (Tidak perlu - pakai autentikasi Tailscale)"
+          echo "-------------------"
+          echo "Perintah : ssh $SSH_USER@$TAILSCALE_IP"
           echo "==================="
           echo ""
           
-          echo "Menjalankan VNC Server (x11vnc)... Ini akan menjaga runner tetap hidup."
-          # Jalankan x11vnc untuk share display :0
-          # Ini adalah proses 'keep-alive' kita.
-          x11vnc -display :0 -rfbauth ~/.vnc/passwd -forever -loop
+          # Jaga runner tetap hidup
+          while true; do
+            echo "[$(date)] SSH Active - Batalkan workflow untuk menghentikan"
+            sleep 300
+          done
