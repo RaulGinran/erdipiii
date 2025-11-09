@@ -1,4 +1,4 @@
-name: RDP + VNC + Tailscale + XFCE (runner)
+name: Modern VNC + Tailscale + XFCE
 
 on:
   workflow_dispatch:
@@ -6,22 +6,24 @@ on:
 jobs:
   setup-remote:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # Tahan sampai 6 jam
+    timeout-minutes: 360
 
     steps:
-      - name: Install Desktop, RDP, VNC, and Chrome
+      - name: Install Desktop, VNC (Modern), and Chrome
         shell: bash
         run: |
           echo "Memulai update dan instalasi..."
           sudo apt-get update
           
-          echo "Menginstall Desktop (XFCE), RDP (XRDP), VNC (TightVNC)..."
-          # Gabungkan instalasi (lebih efisien)
+          echo "Menginstall Desktop (XFCE), VNC (x11vnc + Xvfb)..."
+          # KITA GANTI TOTAL:
+          # - Menghapus xrdp, tigervnc
+          # - Menambah x11vnc (server), xvfb (layar virtual)
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xfce4 \
             xfce4-goodies \
-            xrdp \
-            tightvncserver
+            x11vnc \
+            xvfb
           
           # Install Google Chrome
           echo "Menginstall Google Chrome..."
@@ -32,27 +34,21 @@ jobs:
           
           echo "Instalasi software selesai."
 
-      - name: Configure XRDP and Set Password
+      - name: Set Password for VNC
         shell: bash
         run: |
-          # Konfigurasi XRDP untuk menggunakan XFCE
-          echo "xfce4-session" > ~/.xsession
-          sudo sed -i 's/test -x \/etc\/X11\/Xsession/exec \/bin\/bash \/etc\/X11\/Xsession/' /etc/xrdp/startwm.sh
-          
-          # Restart XRDP service
-          echo "Merestart service XRDP..."
-          sudo systemctl restart xrdp
-          
-          # Set password untuk user 'runner' (user default di GitHub Actions)
           user="runner"
           pass="Asukoe123456" # <- Password basic
           
-          echo "Mengatur password untuk user $user..."
-          echo "$user:$pass" | sudo chpasswd
+          echo "Membuat direktori VNC..."
+          mkdir -p ~/.vnc
           
-          echo "RDP_USER=$user" >> $GITHUB_ENV
-          echo "RDP_PASS=$pass" >> $GITHUB_ENV
-          echo "Konfigurasi user dan password selesai."
+          echo "Mengatur password VNC..."
+          # Kita pakai x11vnc, jadi kita simpan password-nya di file
+          x11vnc -storepasswd "$pass" ~/.vnc/passwd
+          
+          echo "RDP_PASS=$pass" >> $GITHUB_ENV # Kita tetap pakai nama var ini biar gampang
+          echo "Konfigurasi password selesai."
 
       - name: Install and Connect Tailscale
         shell: bash
@@ -84,67 +80,33 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
           echo "Tailscale IP: $tsIP"
 
-      - name: Verify RDP port listening
-        shell: bash
-        run: |
-          echo "Memverifikasi port RDP 3389..."
-          if ! ss -ltn | grep -q 3389; then
-            echo "::error::Port RDP 3389 tidak 'listen'."
-            sudo systemctl status xrdp
-            exit 1
-          fi
-          echo "Verifikasi RDP 3389 berhasil. Service 'listen'."
-
-      - name: Configure and Start VNC Server
-        shell: bash
-        run: |
-          echo "Mengkonfigurasi VNC Server..."
-          
-          # 1. Buat direktori konfigurasi VNC
-          mkdir -p ~/.vnc
-          
-          # 2. Set password VNC (sama dengan RDP) secara non-interaktif
-          (echo "Asukoe123456"; echo "Asukoe123456") | vncpasswd
-          
-          # 3. Buat file xstartup agar VNC tahu harus menjalankan XFCE
-          cat << 'EOF' > ~/.vnc/xstartup
-          #!/bin/bash
-          unset SESSION_MANAGER
-          unset DBUS_SESSION_BUS_ADDRESS
-          startxfce4 &
-          EOF
-          
-          # 4. Buat file xstartup executable
-          chmod +x ~/.vnc/xstartup
-          
-          echo "Menjalankan VNC Server di display :1 (Port 5901)..."
-          # 5. Jalankan VNC server di background
-          vncserver :1 -geometry 1280x800 -depth 24
-          
-          echo "VNC Server berjalan."
-
-      - name: Show connection info & keep alive
+      - name: Start VNC Server & Keep Alive
         shell: bash
         timeout-minutes: 360 # Sesuaikan dengan timeout job
         run: |
+          echo "Mempersiapkan layar virtual (Xvfb)..."
+          # Jalankan Xvfb di display :0, di background
+          Xvfb :0 -screen 0 1280x800x24 -nocursor &
+          
+          # Atur agar semua program tahu layarnya ada di :0
+          export DISPLAY=:0
+          
+          echo "Menjalankan XFCE Desktop di layar virtual..."
+          # Jalankan XFCE di background
+          startxfce4 &
+          
+          # Tunggu desktop siap
+          sleep 5
+          
           echo ""
           echo "==================="
-          echo "=== RDP ACCESS ==="
-          echo "Address  : $TAILSCALE_IP"
-          echo "Port     : 3389 (Default)"
-          echo "Username : $RDP_USER"
-          echo "Password : $RDP_PASS"
-          echo "==================="
-          echo ""
-          echo "==================="
-          echo "=== VNC ACCESS ==="
-          echo "Address  : $TAILSCALE_IP:5901"
+          echo "=== VNC ACCESS (Modern) ==="
+          echo "Address  : $TAILSCALE_IP:5900"
           echo "Password : $RDP_PASS"
           echo "==================="
           echo ""
           
-          # Jaga runner tetap hidup
-          while true; do
-            echo "[$(date)] RDP/VNC Active - Batalkan workflow untuk menghentikan"
-            sleep 300
-          done
+          echo "Menjalankan VNC Server (x11vnc)... Ini akan menjaga runner tetap hidup."
+          # Jalankan x11vnc untuk share display :0
+          # Ini adalah proses 'keep-alive' kita.
+          x11vnc -display :0 -rfbauth ~/.vnc/passwd -forever -loop
