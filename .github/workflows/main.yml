@@ -1,4 +1,4 @@
-name: RDP + Tailscale + XFCE (runner)
+name: RDP + VNC + Tailscale + XFCE (runner)
 
 on:
   workflow_dispatch:
@@ -9,19 +9,19 @@ jobs:
     timeout-minutes: 360 # Tahan sampai 6 jam
 
     steps:
-      - name: Install XFCE, XRDP, and Chrome
+      - name: Install Desktop, RDP, VNC, and Chrome
         shell: bash
         run: |
           echo "Memulai update dan instalasi..."
           sudo apt-get update
           
-          # Install XFCE (Desktop Environment)
-          echo "Menginstall XFCE..."
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies
-          
-          # Install XRDP (RDP Server)
-          echo "Menginstall XRDP..."
-          sudo apt-get install -y xrdp
+          echo "Menginstall Desktop (XFCE), RDP (XRDP), VNC (TightVNC)..."
+          # Gabungkan instalasi (lebih efisien)
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            xrdp \
+            tightvncserver
           
           # Install Google Chrome
           echo "Menginstall Google Chrome..."
@@ -44,7 +44,6 @@ jobs:
           sudo systemctl restart xrdp
           
           # Set password untuk user 'runner' (user default di GitHub Actions)
-          # --- INI BAGIAN YANG DIPERBAIKI (sintaks Bash) ---
           user="runner"
           pass="Asukoe123456" # <- Password basic
           
@@ -62,7 +61,6 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sudo sh
           
           echo "Menghubungkan ke Tailscale..."
-          # Gunakan --accept-routes untuk fungsionalitas penuh (opsional tapi disarankan)
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$GITHUB_RUN_ID" --accept-routes
           
           # Ambil IPv4 dengan retry
@@ -90,13 +88,40 @@ jobs:
         shell: bash
         run: |
           echo "Memverifikasi port RDP 3389..."
-          # ss (socket statistics) adalah pengganti netstat di Linux modern
           if ! ss -ltn | grep -q 3389; then
             echo "::error::Port RDP 3389 tidak 'listen'."
             sudo systemctl status xrdp
             exit 1
           fi
           echo "Verifikasi RDP 3389 berhasil. Service 'listen'."
+
+      - name: Configure and Start VNC Server
+        shell: bash
+        run: |
+          echo "Mengkonfigurasi VNC Server..."
+          
+          # 1. Buat direktori konfigurasi VNC
+          mkdir -p ~/.vnc
+          
+          # 2. Set password VNC (sama dengan RDP) secara non-interaktif
+          (echo "Asukoe123456"; echo "Asukoe123456") | vncpasswd
+          
+          # 3. Buat file xstartup agar VNC tahu harus menjalankan XFCE
+          cat << 'EOF' > ~/.vnc/xstartup
+          #!/bin/bash
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          startxfce4 &
+          EOF
+          
+          # 4. Buat file xstartup executable
+          chmod +x ~/.vnc/xstartup
+          
+          echo "Menjalankan VNC Server di display :1 (Port 5901)..."
+          # 5. Jalankan VNC server di background
+          vncserver :1 -geometry 1280x800 -depth 24
+          
+          echo "VNC Server berjalan."
 
       - name: Show connection info & keep alive
         shell: bash
@@ -106,13 +131,20 @@ jobs:
           echo "==================="
           echo "=== RDP ACCESS ==="
           echo "Address  : $TAILSCALE_IP"
+          echo "Port     : 3389 (Default)"
           echo "Username : $RDP_USER"
+          echo "Password : $RDP_PASS"
+          echo "==================="
+          echo ""
+          echo "==================="
+          echo "=== VNC ACCESS ==="
+          echo "Address  : $TAILSCALE_IP:5901"
           echo "Password : $RDP_PASS"
           echo "==================="
           echo ""
           
           # Jaga runner tetap hidup
           while true; do
-            echo "[$(date)] RDP Active - Batalkan workflow untuk menghentikan"
+            echo "[$(date)] RDP/VNC Active - Batalkan workflow untuk menghentikan"
             sleep 300
           done
