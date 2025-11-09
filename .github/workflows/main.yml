@@ -1,4 +1,4 @@
-name: RDP + Tailscale (Ubuntu MATE, FULL FIX)
+name: RDP + Tailscale + XFCE (runner)
 
 on:
   workflow_dispatch:
@@ -6,147 +6,112 @@ on:
 jobs:
   setup-remote:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 360 # Tahan sampai 6 jam
 
     steps:
-      - name: Update apt & tools
+      - name: Install XFCE, XRDP, and Chrome
         shell: bash
         run: |
-          set -euxo pipefail
+          echo "Memulai update dan instalasi..."
           sudo apt-get update
-          sudo apt-get install -y curl wget gnupg lsof net-tools ca-certificates software-properties-common
+          
+          # Install XFCE (Desktop Environment)
+          echo "Menginstall XFCE..."
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies
+          
+          # Install XRDP (RDP Server)
+          echo "Menginstall XRDP..."
+          sudo apt-get install -y xrdp
+          
+          # Install Google Chrome
+          echo "Menginstall Google Chrome..."
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          
+          echo "Instalasi software selesai."
 
-      - name: Create users & passwords (runneradmin + runner)
+      - name: Configure XRDP and Set Password
         shell: bash
         run: |
-          set -euxo pipefail
-          PASS="Asukoe123456"
-          # runneradmin
-          if ! id -u runneradmin >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash runneradmin
-          fi
-          echo "runneradmin:${PASS}" | sudo chpasswd
-          sudo usermod -aG sudo runneradmin
-          # pastikan user default 'runner' juga bisa login dgn pass sama
-          echo "runner:${PASS}" | sudo chpasswd || true
-
-          echo "RDP_USER1=runneradmin" >> "$GITHUB_ENV"
-          echo "RDP_USER2=runner" >> "$GITHUB_ENV"
-          echo "RDP_PASS=${PASS}" >> "$GITHUB_ENV"
-
-      - name: Install MATE Desktop + xRDP (stable)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            mate-desktop-environment-core mate-terminal marco pluma engrampa eom \
-            xrdp xorgxrdp dbus-x11 policykit-1 dconf-cli
-
-          sudo adduser xrdp ssl-cert || true
-
-      - name: Force xRDP -> MATE & fix permissions (runner + runneradmin)
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          fix_user () {
-            local U="$1"
-            local H="/home/$U"
-            id "$U" || return 0
-
-            # Session files
-            sudo -u "$U" bash -lc 'echo "mate-session" > ~/.xsession'
-            sudo -u "$U" bash -lc 'printf "[Desktop Entry]\nType=Application\nName=MATE\nExec=mate-session\n" > ~/.xsessionrc || true'
-
-            # Ensure config dirs exist and writable
-            sudo -u "$U" mkdir -p "$H/.config/caja" "$H/.config/dconf"
-            sudo chown -R "$U:$U" "$H/.config"
-            sudo chmod -R u+rwX "$H/.config"
-
-            # Some themes/icons avoid warnings (optional)
-            sudo -u "$U" mkdir -p "$H/.local/share"
-
-            # Initialize dconf so Caja/Panel can write settings
-            sudo -u "$U" dbus-launch dconf update || true
-          }
-
-          fix_user runner
-          fix_user runneradmin
-
-          # Patch startwm.sh to always start MATE (with sane env)
-          sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
-          sudo bash -c 'cat >/etc/xrdp/startwm.sh' <<'EOF'
-          #!/bin/sh
-          if test -r /etc/profile; then . /etc/profile; fi
-          if test -r /etc/default/locale; then . /etc/default/locale; export LANG LANGUAGE; fi
-
-          export XDG_CONFIG_DIRS="/etc/xdg:/etc"
-          export XDG_DATA_DIRS="/usr/share:/usr/local/share"
-          export DESKTOP_SESSION=mate
-          export XDG_CURRENT_DESKTOP=MATE
-
-          # start user dbus if available
-          if command -v dbus-launch >/dev/null 2>&1; then
-            eval "$(dbus-launch --sh-syntax)" || true
-          fi
-
-          if command -v mate-session >/dev/null 2>&1; then
-            exec mate-session
-          fi
-
-          # Fallback
-          if test -r /etc/X11/Xsession; then
-            exec /etc/X11/Xsession
-          fi
-          EOF
-          sudo chmod +x /etc/xrdp/startwm.sh
-
-          sudo systemctl enable xrdp
+          # Konfigurasi XRDP untuk menggunakan XFCE
+          echo "xfce4-session" > ~/.xsession
+          sudo sed -i 's/test -x \/etc\/X11\/Xsession/exec \/bin\/bash \/etc\/X11\/Xsession/' /etc/xrdp/startwm.sh
+          
+          # Restart XRDP service
+          echo "Merestart service XRDP..."
           sudo systemctl restart xrdp
+          
+          # Set password untuk user 'runner' (user default di GitHub Actions)
+          $user = "runner"
+          $pass = "Asukoe123456" # <- Password basic
+          
+          echo "Mengatur password untuk user $user..."
+          echo "$user:$pass" | sudo chpasswd
+          
+          echo "RDP_USER=$user" >> $GITHUB_ENV
+          echo "RDP_PASS=$pass" >> $GITHUB_ENV
+          echo "Konfigurasi user dan password selesai."
 
-      - name: Install Tailscale
+      - name: Install and Connect Tailscale
         shell: bash
         run: |
-          set -euxo pipefail
-          curl -fsSL https://tailscale.com/install.sh | sh
-          tailscale --version || true
+          echo "Menginstall Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          
+          echo "Menghubungkan ke Tailscale..."
+          # Gunakan --accept-routes untuk fungsionalitas penuh (opsional tapi disarankan)
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$GITHUB_RUN_ID" --accept-routes
+          
+          # Ambil IPv4 dengan retry
+          echo "Mendapatkan IP Tailscale..."
+          tsIP=""
+          retries=0
+          while [ -z "$tsIP" ] && [ $retries -lt 12 ]; do
+            tsIP=$(sudo tailscale ip -4)
+            if [ -z "$tsIP" ]; then
+              echo "Menunggu IP... (Percobaan $((retries+1)))"
+              sleep 5
+              retries=$((retries + 1))
+            fi
+          done
 
-      - name: Connect Tailscale
-        shell: bash
-        env:
-          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          set -euxo pipefail
-          sudo tailscale up --authkey="${TS_AUTHKEY}" --hostname="gh-ubuntu-${GITHUB_RUN_ID}"
-          TS_IP="$(tailscale ip -4 | head -n1 || true)"
-          if [ -z "$TS_IP" ]; then
-            echo "No Tailscale IPv4"; exit 1
+          if [ -z "$tsIP" ]; then
+            echo "::error::Gagal mendapatkan IP Tailscale."
+            exit 1
           fi
-          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
-          echo "Tailscale IP: $TS_IP"
+          
+          echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
+          echo "Tailscale IP: $tsIP"
 
-      - name: Verify xRDP listening
+      - name: Verify RDP port listening
         shell: bash
         run: |
-          set -euxo pipefail
-          sudo ss -tulpn | awk '$1 ~ /LISTEN/ && $5 ~ /:3389/ {print $0}' || true
-          echo "Test connect via Tailscale:"
-          timeout 5 bash -lc "exec 3<>/dev/tcp/${TAILSCALE_IP}/3389" && echo "OK 3389" || (echo "FAIL 3389" && exit 1)
+          echo "Memverifikasi port RDP 3389..."
+          # ss (socket statistics) adalah pengganti netstat di Linux modern
+          if ! ss -ltn | grep -q 3389; then
+            echo "::error::Port RDP 3389 tidak 'listen'."
+            sudo systemctl status xrdp
+            exit 1
+          fi
+          echo "Verifikasi RDP 3389 berhasil. Service 'listen'."
 
       - name: Show connection info & keep alive
         shell: bash
-        timeout-minutes: 360
+        timeout-minutes: 360 # Sesuaikan dengan timeout job
         run: |
-          set -euxo pipefail
-          echo
-          echo "=== RDP ACCESS (Ubuntu MATE) ==="
-          echo "Address : ${TAILSCALE_IP}"
-          echo "User 1  : ${RDP_USER1}"
-          echo "User 2  : ${RDP_USER2}"
-          echo "Password: ${RDP_PASS}"
-          echo "================================"
-          echo
+          echo ""
+          echo "==================="
+          echo "=== RDP ACCESS ==="
+          echo "Address  : $TAILSCALE_IP"
+          echo "Username : $RDP_USER"
+          echo "Password : $RDP_PASS"
+          echo "==================="
+          echo ""
+          
+          # Jaga runner tetap hidup
           while true; do
-            echo "[$(date)] RDP Active - cancel workflow to terminate"
+            echo "[$(date)] RDP Active - Batalkan workflow untuk menghentikan"
             sleep 300
           done
