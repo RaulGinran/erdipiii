@@ -1,175 +1,166 @@
-name: macOS Tailscale + TigerVNC (minimal X11)
+name: RDP + Tailscale + StarDesk (runneradmin)
 
 on:
   workflow_dispatch:
     inputs:
-      VNC_PASS:
-        description: "Opsional: VNC password (kosong = auto-generate)"
+      STAR_DESK_URL:
+        description: "Optional: direct URL to StarDesk_1.0.1.exe (paste if known)"
         required: false
         default: ""
-      GEOMETRY:
-        description: "Resolusi layar (mis. 1920x1080)"
-        required: false
-        default: "1920x1080"
 
 jobs:
-  macos-remote:
-    runs-on: macos-latest
-    timeout-minutes: 360
+  setup-remote:
+    runs-on: windows-latest
+    timeout-minutes: 360   # tahan sampai 6 jam; ubah sesuai kebutuhan
 
     steps:
-      - name: Info runner
-        shell: bash
+      - name: Enable RDP & firewall
+        shell: pwsh
         run: |
-          set -euo pipefail
-          sw_vers
-          whoami
-          echo "HOME=$HOME"
+          # Aktifkan RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          # (opsional) nonaktifkan NLA untuk testing cepat
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
 
-      - name: Ensure Homebrew in PATH
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v brew >/dev/null 2>&1; then
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          fi
-          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
-          eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
-          brew --version
+          # Firewall allow 3389
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-      - name: Install tailscale
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew update
-          brew install tailscale || brew upgrade tailscale || true
-          command -v tailscale && tailscale version
+          # Restart RDP service
+          Restart-Service -Name TermService -Force
 
-      - name: Install TigerVNC
-        shell: bash
+      - name: Use runneradmin for RDP (change password & ensure RDP group)
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if brew info tigervnc >/dev/null 2>&1; then
-            brew install tigervnc || brew upgrade tigervnc || true
-          else
-            brew install tiger-vnc || brew upgrade tiger-vnc || true
-          fi
-          command -v vncserver || true
-          command -v Xtigervnc || true
+          $user = "runneradmin"
+          $pass = "Asukoe123456"   # <- testing; ganti kapan saja
+          Set-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force)
+          try { Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction Stop } catch {}
+          echo "RDP_USER=$user" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$pass" >> $env:GITHUB_ENV
 
-      - name: Start tailscaled & connect
-        shell: bash
-        env:
-          TS_AUTH: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      - name: Install Tailscale (robust)
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if [ -z "${TS_AUTH:-}" ]; then
-            echo "Missing secret: TAILSCALE_AUTH_KEY" >&2
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          $p = Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/qn", "/norestart" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Error "Tailscale MSI install failed ($($p.ExitCode))"; exit 1 }
+
+          # Temukan tailscale.exe
+          $candidates = @(
+            "$env:ProgramFiles\Tailscale LLC\Tailscale\tailscale.exe",
+            "$env:ProgramFiles\Tailscale\tailscale.exe",
+            "$env:ProgramFiles(x86)\Tailscale LLC\Tailscale\tailscale.exe",
+            "$env:ProgramFiles(x86)\Tailscale\tailscale.exe"
+          )
+          $tsExe = $null
+          for ($i=0; $i -lt 20 -and -not $tsExe; $i++) {
+            $tsExe = ($candidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
+            if (-not $tsExe) {
+              try {
+                $f = Get-ChildItem -Path "$env:ProgramFiles*", "C:\ProgramData" -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($f) { $tsExe = $f.FullName }
+              } catch {}
+            }
+            if (-not $tsExe) { Start-Sleep -Seconds 2 }
+          }
+          if (-not $tsExe) { Write-Error "tailscale.exe not found"; exit 1 }
+          echo "TS_EXE=$tsExe" >> $env:GITHUB_ENV
+          Write-Host "tailscale.exe at: $tsExe"
+
+      - name: Connect Tailscale
+        shell: pwsh
+        run: |
+          $tsExe = $env:TS_EXE
+          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$env:GITHUB_RUN_ID"
+          if ($LASTEXITCODE -ne 0) { Write-Error "tailscale up failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
+
+          # Ambil IPv4 dengan retry
+          $tsIP = $null; $retries = 0
+          while (-not $tsIP -and $retries -lt 12) {
+            $tsIP = & $tsExe ip -4
+            if (-not $tsIP) { Start-Sleep -Seconds 5; $retries++ }
+          }
+          if (-not $tsIP) { Write-Error "No Tailscale IPv4"; exit 1 }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $tsIP"
+
+      - name: Verify RDP port via Tailscale
+        shell: pwsh
+        run: |
+          $r = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $r.TcpTestSucceeded) { Write-Error "RDP 3389 not reachable"; exit 1 }
+          Write-Host "RDP 3389 reachable."
+
+      - name: Install StarDesk 1.0.1
+        shell: pwsh
+        run: |
+          $tmp = "$env:TEMP\stardesk"; New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+          $out = Join-Path $tmp "StarDesk_1.0.1.exe"
+
+          # 1) Pakai input kalau disediakan
+          $urlInput = "${{ github.event.inputs.STAR_DESK_URL }}"
+          $urls = @()
+          if ($urlInput -and $urlInput.Trim().Length -gt 0) { $urls += $urlInput.Trim() }
+
+          # 2) Kandidat URL umum ke file StarDesk_1.0.1.exe
+          $filename = "StarDesk_1.0.1.exe"
+          $urls += @(
+            "https://www.stardesk.net/$filename",
+            "https://www.stardesk.net/res/download/$filename",
+            "https://stardesk.net/$filename",
+            "https://download.stardesk.net/$filename",
+            "https://cdn.stardesk.net/$filename"
+          )
+
+          $success = $false
+          foreach ($u in $urls) {
+            try {
+              Write-Host "Trying $u"
+              Invoke-WebRequest -Uri $u -OutFile $out -UseBasicParsing -TimeoutSec 180 -MaximumRedirection 5
+              if ((Test-Path $out) -and ((Get-Item $out).Length -gt 2MB)) { $success = $true; break }
+            } catch {
+              Write-Host "Failed: $u"
+            }
+          }
+          if (-not $success) {
+            Write-Error "Gagal download StarDesk_1.0.1.exe. Jalankan lagi dan isi input STAR_DESK_URL (link langsung dari tombol 'StarDesk for Windows')."
             exit 1
-          fi
-          sudo nohup tailscaled --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
+          }
 
-          for i in $(seq 1 20); do
-            tailscale status >/dev/null 2>&1 && break || sleep 1
-          done
+          # Coba silent switches umum; jika gagal, jalankan normal
+          $args = @("/S", "/silent", "/verysilent")
+          $installed = $false
+          foreach ($a in $args) {
+            try {
+              $p = Start-Process -FilePath $out -ArgumentList $a -Wait -PassThru -WindowStyle Hidden
+              if ($p.ExitCode -eq 0) { $installed = $true; break }
+            } catch {}
+          }
+          if (-not $installed) {
+            Write-Host "Silent unknown; running without switches..."
+            Start-Process -FilePath $out -Wait
+          }
+          Write-Host "StarDesk installer executed."
 
-          HOST="gha-macos-${GITHUB_RUN_ID}"
-          sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}" --accept-routes --accept-dns || \
-          sudo tailscale up --authkey="${TS_AUTH}" --hostname="${HOST}"
-
-          ip4="$(tailscale ip -4 | awk '/^ *100\./{print $1;exit}')"
-          if [ -z "$ip4" ]; then
-            echo "No Tailscale IPv4 yet"
-            tailscale status || true
-            tail -n 100 /tmp/tailscaled.log || true
-            exit 1
-          fi
-          echo "TAILSCALE_IP=$ip4" >> "$GITHUB_ENV"
-          echo "Tailscale IP: $ip4"
-
-      - name: Configure VNC & launch Xtigervnc directly
-        shell: bash
-        env:
-          VNC_PASS_INPUT: ${{ github.event.inputs.VNC_PASS }}
-          GEOM: ${{ github.event.inputs.GEOMETRY }}
-        run: |
-          set -euo pipefail
-
-          if [ -n "${VNC_PASS_INPUT:-}" ]; then
-            VNC_PASS="$VNC_PASS_INPUT"
-          else
-            VNC_PASS="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)"
-            echo "::notice::Generated VNC password: ${VNC_PASS}"
-          fi
-          echo "VNC_PASS=$VNC_PASS" >> "$GITHUB_ENV"
-
-          mkdir -p "$HOME/.vnc"
-          if command -v vncpasswd >/dev/null 2>&1; then
-            printf "%s\n" "$VNC_PASS" | vncpasswd -f > "$HOME/.vnc/passwd"
-          else
-            printf "%s\n" "$VNC_PASS" | /opt/homebrew/bin/vncpasswd -f > "$HOME/.vnc/passwd"
-          fi
-          chmod 600 "$HOME/.vnc/passwd"
-
-          XTIGERVNC="$(command -v Xtigervnc || true)"
-          if [ -z "$XTIGERVNC" ]; then
-            for p in /opt/homebrew/bin/Xtigervnc /usr/local/bin/Xtigervnc $(brew --prefix 2>/dev/null)/bin/Xtigervnc; do
-              [ -x "$p" ] && XTIGERVNC="$p" && break
-            done
-          fi
-          if [ -z "$XTIGERVNC" ]; then
-            echo "Xtigervnc not found." >&2
-            exit 1
-          fi
-
-          pkill -f Xtigervnc || true
-          pkill -f Xvnc || true
-
-          GEOM="${GEOM:-1920x1080}"
-          LOG_VNC="/tmp/vncserver.log"
-          nohup "$XTIGERVNC" :1 \
-            -geometry "$GEOM" \
-            -desktop "GHA VNC" \
-            -rfbport 5900 \
-            -localhost no \
-            -SecurityTypes VncAuth \
-            -rfbauth "$HOME/.vnc/passwd" \
-            -AlwaysShared=1 \
-            -IdleTimeout=0 \
-            -MaxDisconnectionTime=0 \
-            -MaxConnectionTime=0 \
-            > "$LOG_VNC" 2>&1 &
-
-          for i in $(seq 1 15); do
-            sleep 1
-            if lsof -iTCP:5900 -sTCP:LISTEN >/dev/null 2>&1; then
-              break
-            fi
-          done
-
-          tail -n 50 "$LOG_VNC" || true
-
-          if command -v xterm >/dev/null 2>&1; then
-            ( DISPLAY=:1 nohup xterm >/tmp/xterm.log 2>&1 & ) || true
-          fi
-
-          echo "VNC_PORT=5900" >> "$GITHUB_ENV"
-
-      - name: Connection info & keep alive
-        shell: bash
+      - name: Show connection info & keep alive
+        shell: pwsh
         timeout-minutes: 360
         run: |
-          echo ""
-          echo "=== CONNECTION INFO ==="
-          echo "Tailscale IP : ${TAILSCALE_IP}"
-          echo "VNC address  : ${TAILSCALE_IP}:5900"
-          echo "VNC password : ${VNC_PASS}"
-          echo "Geometry     : ${GEOMETRY:-1920x1080}"
-          echo "===================================="
-          echo ""
-          while true; do
-            date
-            tailscale status | head -n 20 || true
-            ps aux | egrep 'vncserver|Xvnc|Xtigervnc' | egrep -v egrep || true
-            sleep 300
-          done
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address : $env:TAILSCALE_IP"
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "==================`n"
+
+          # Pastikan port 3389 listen
+          try { Get-NetTCPConnection -LocalPort 3389 -State Listen | Out-Host } catch {}
+
+          # Keep runner hidup
+          while ($true) {
+            Write-Host "[$(Get-Date)] RDP Active - Cancel workflow to terminate"
+            Start-Sleep -Seconds 300
+          }
