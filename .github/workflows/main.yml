@@ -1,4 +1,4 @@
-name: Yanzz
+name: Yanzz W11-RDP-TS-FULL
 
 on:
   workflow_dispatch:
@@ -10,57 +10,67 @@ jobs:
 
     steps:
       - name: Enable RDP + W11 look
+        shell: powershell
         run: |
-          Set-ItemProperty -Path 'HKLM:SystemCurrentControlSetControlTerminal Server' -name "fDenyTSConnections" -value 0
-          Set-ItemProperty -Path 'HKLM:SystemCurrentControlSetControlTerminal ServerWinStationsRDP-Tcp' -name "UserAuthentication" -value 0
-          Set-ItemProperty -Path 'HKLM:SystemCurrentControlSetControlTerminal ServerWinStationsRDP-Tcp' -name "SecurityLayer" -value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SecurityLayer' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
           Restart-Service -Name TermService -Force
 
           # W11 wallpaper
-          Invoke-WebRequest https://res.cloudinary.com/drsmmc2hz/image/upload/v1763382890/ebloza4ferubydvmutcj.jpg -OutFile C:\w11.jpg
+          Invoke-WebRequest "https://res.cloudinary.com/drsmmc2hz/image/upload/v1763382890/ebloza4ferubydvmutcj.jpg" -OutFile "C:\w11.jpg"
           reg add "HKCU\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "C:\w11.jpg" /f
           RUNDLL32.EXE user32.dll,UpdatePerUserSystemParameters
 
       - name: Create root user Yanzz
+        shell: powershell
         run: |
           $pass = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
           New-LocalUser -Name "Yanzz" -Password $sec -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "Yanzz"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Yanzz"
+
           # Simpan Creds ke file sementara biar bisa dibaca step selanjutnya
-          echo "User: Yanzz" > C:\creds.txt
-          echo "Pass: $pass" >> C:\creds.txt
-          echo "CREDS=User: Yanzz  |  Pass: $pass" >> $env:GITHUB_ENV
+          "User: Yanzz" | Out-File -FilePath C:\creds.txt -Encoding utf8
+          "Pass: $pass" | Out-File -FilePath C:\creds.txt -Encoding utf8 -Append
+          "CREDS=User: Yanzz  |  Pass: $pass" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Tailscale
+        shell: powershell
         run: |
-          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe -OutFile ts.exe
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "ts.exe"
           Start-Process -FilePath "ts.exe" -ArgumentList "/quiet", "/norestart" -Wait
 
       - name: Establish Tailscale Connection
+        shell: powershell
         run: |
-          & "$env:ProgramFilesTailscale	ailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gha-rdp-yanzz --accept-routes
-          $ip = & "$env:ProgramFilesTailscale	ailscale.exe" ip -4
-          echo "TS_IP=$ip" >> $env:GITHUB_ENV
+          $tsPath = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+          & $tsPath up --authkey "${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname "gha-rdp-yanzz" --accept-routes
+          $ip = & $tsPath ip -4
+          "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Chrome
+        shell: powershell
         run: |
-          Invoke-WebRequest https://dl.google.com/chrome/install/latest/chrome_installer.exe -OutFile chrome.exe
-          Start-Process .chrome.exe -Args "/silent /install" -Wait
+          Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile "chrome.exe"
+          Start-Process ".\chrome.exe" -ArgumentList "/silent", "/install" -Wait
 
       - name: Download Roblox (Installer Only)
+        shell: powershell
         run: |
-          Invoke-WebRequest https://setup.rbxcdn.com/RobloxPlayerLauncher.exe -OutFile C:\RobloxPlayerLauncher.exe
+          Invoke-WebRequest "https://setup.rbxcdn.com/RobloxPlayerLauncher.exe" -OutFile "C:\RobloxPlayerLauncher.exe"
           Write-Host "Roblox Installer saved at C:\RobloxPlayerLauncher.exe"
 
       - name: Install VS Code
+        shell: powershell
         run: |
-          Invoke-WebRequest "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64-user" -OutFile vscode.exe
-          Start-Process .scode.exe -ArgumentList "/VERYSILENT /MERGETASKS=!runcode" -Wait
+          Invoke-WebRequest "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64-user" -OutFile "vscode.exe"
+          Start-Process ".\vscode.exe" -ArgumentList "/VERYSILENT", "/MERGETASKS=!runcode" -Wait
 
       - name: Set Environment & Wallpaper System-wide
+        shell: powershell
         run: |
           reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v Wallpaper /t REG_SZ /d "C:\w11.jpg" /f
           reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v WallpaperStyle /t REG_SZ /d "2" /f
@@ -68,17 +78,19 @@ jobs:
           reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA /t REG_DWORD /d 0 /f
 
       - name: SHOW CREDENTIALS
+        shell: powershell
         run: |
           Write-Host "=========================================="
           Write-Host "       YANZZ RDP (GITHUB ACTIONS)         "
           Write-Host "=========================================="
           Write-Host "IP ADDRESS (Tailscale) : $env:TS_IP"
-          cat C:\creds.txt
+          Get-Content C:\creds.txt
           Write-Host "=========================================="
           Write-Host "Roblox Installer: C:\RobloxPlayerLauncher.exe"
           Write-Host "=========================================="
 
       - name: Anti-Shutdown Loop (6 Hours Max)
+        shell: powershell
         run: |
           $i = 0
           while ($i -lt 360) {
